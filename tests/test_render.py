@@ -1,4 +1,4 @@
-"""Render/studio: diagram + podcast generation grounded in memory search,
+"""Render/studio: diagram + podcast generation grounded in pipeline search,
 Mermaid validation with one retry, and the env-gated TTS stub — no network."""
 
 from __future__ import annotations
@@ -18,28 +18,19 @@ def _chunk(id_: str, source_path: str, text: str) -> SourceChunk:
     )
 
 
-class _FakeMemory:
-    """Records every `search` call and always returns one grounded chunk."""
+class _FakePipeline:
+    """Records every `.retrieve` call and always returns one grounded chunk."""
 
     def __init__(self):
         self.queries: list[str] = []
 
-    def search(self, query: str, k: int = 5) -> list[SearchResult]:
+    def retrieve(self, query: str, k: int = 5) -> list[SearchResult]:
         self.queries.append(query)
         return [
             SearchResult(
                 chunk=_chunk("a", "src/app.py", "the app has a web server and a db"), score=1.0
             )
         ]
-
-    def add_chunks(self, chunks):  # pragma: no cover - unused
-        raise NotImplementedError
-
-    def has_source(self, path: str) -> bool:  # pragma: no cover - unused
-        return False
-
-    def count(self) -> int:  # pragma: no cover - unused
-        return 1
 
 
 VALID_MERMAID = "```mermaid\nflowchart TD\n  A[Web Server] --> B[(DB)]\n```"
@@ -51,15 +42,15 @@ class TestGenerateDiagram:
             "htc.world_model.render.diagram.complete",
             lambda *a, **k: LLMResponse(text=VALID_MERMAID),
         )
-        memory = _FakeMemory()
-        markdown = generate_diagram(tmp_path, memory=memory, model="test-model")
+        pipeline = _FakePipeline()
+        markdown = generate_diagram(tmp_path, pipeline=pipeline, model="test-model")
 
         assert "```mermaid" in markdown
         assert "-->" in markdown
         out = tmp_path / ".htc" / "studio" / "architecture.mmd.md"
         assert out.is_file()
         assert out.read_text() == markdown
-        assert memory.queries == [
+        assert pipeline.queries == [
             "architecture modules data flow components how system is put together"
         ]
 
@@ -71,8 +62,8 @@ class TestGenerateDiagram:
             return LLMResponse(text="not a diagram at all")
 
         monkeypatch.setattr("htc.world_model.render.diagram.complete", _complete)
-        memory = _FakeMemory()
-        markdown = generate_diagram(tmp_path, memory=memory)
+        pipeline = _FakePipeline()
+        markdown = generate_diagram(tmp_path, pipeline=pipeline)
 
         assert len(calls) == 2
         assert NO_DIAGRAM in markdown
@@ -84,8 +75,8 @@ class TestGenerateDiagram:
         monkeypatch.setattr(
             "htc.world_model.render.diagram.complete", lambda *a, **k: next(replies)
         )
-        memory = _FakeMemory()
-        markdown = generate_diagram(tmp_path, memory=memory)
+        pipeline = _FakePipeline()
+        markdown = generate_diagram(tmp_path, pipeline=pipeline)
 
         assert "```mermaid" in markdown
 
@@ -96,15 +87,15 @@ class TestGenerateDiagram:
                 text="```mermaid\nmindmap\n  root((App))\n    Web\n    DB\n```"
             ),
         )
-        memory = _FakeMemory()
-        markdown = generate_diagram(tmp_path, memory=memory, kind="mindmap")
+        pipeline = _FakePipeline()
+        markdown = generate_diagram(tmp_path, pipeline=pipeline, kind="mindmap")
 
         assert "```mermaid" in markdown
-        assert memory.queries == ["project overview purpose main components concepts"]
+        assert pipeline.queries == ["project overview purpose main components concepts"]
 
     def test_unknown_kind_raises(self, tmp_path):
         with pytest.raises(ValueError, match="unknown diagram kind"):
-            generate_diagram(tmp_path, memory=_FakeMemory(), kind="bogus")
+            generate_diagram(tmp_path, pipeline=_FakePipeline(), kind="bogus")
 
 
 class TestGeneratePodcastScript:
@@ -114,15 +105,15 @@ class TestGeneratePodcastScript:
             "htc.world_model.render.podcast.complete",
             lambda *a, **k: LLMResponse(text=script_text),
         )
-        memory = _FakeMemory()
-        script = generate_podcast_script(tmp_path, memory=memory, model="test-model")
+        pipeline = _FakePipeline()
+        script = generate_podcast_script(tmp_path, pipeline=pipeline, model="test-model")
 
         assert "Host A:" in script
         assert "Host B:" in script
         out = tmp_path / ".htc" / "studio" / "overview-script.md"
         assert out.is_file()
         assert out.read_text() == script + "\n"
-        assert memory.queries == [
+        assert pipeline.queries == [
             "project overview purpose architecture what this system does for a new team member"
         ]
 
@@ -131,7 +122,7 @@ class TestGeneratePodcastScript:
             "htc.world_model.render.podcast.complete", lambda *a, **k: LLMResponse(text="   ")
         )
         with pytest.raises(RuntimeError, match="empty"):
-            generate_podcast_script(tmp_path, memory=_FakeMemory())
+            generate_podcast_script(tmp_path, pipeline=_FakePipeline())
 
 
 class TestRenderAudio:

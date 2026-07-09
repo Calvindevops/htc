@@ -1,7 +1,7 @@
 """Agentic/iterative retrieval: `answer_question(..., iterative=True)` loops
 retrieve -> assess -> (maybe) followup-retrieve -> merge before the final
 synthesis call. Opt-in and bounded — no network (complete() is monkeypatched,
-retrieval is a fake in-memory store)."""
+retrieval is a fake pipeline)."""
 
 from __future__ import annotations
 
@@ -21,26 +21,18 @@ def _chunk(id_: str, source_path: str, text: str) -> SourceChunk:
     )
 
 
-class _FakeMemory:
+class _FakePipeline:
     """Returns results per-query from a dict keyed by the exact query string
-    (falling back to an empty list), recording every call."""
+    (falling back to an empty list), recording every `.retrieve` call."""
 
     def __init__(self, results_by_query: dict[str, list[SearchResult]]):
         self._results_by_query = results_by_query
+        self.graph = None
         self.calls: list[tuple[str, int]] = []
 
-    def search(self, query: str, k: int = 5, graph=None) -> list[SearchResult]:
+    def retrieve(self, query: str, k: int = 5) -> list[SearchResult]:
         self.calls.append((query, k))
         return self._results_by_query.get(query, [])[:k]
-
-    def add_chunks(self, chunks):  # pragma: no cover - unused by these tests
-        raise NotImplementedError
-
-    def has_source(self, path: str) -> bool:  # pragma: no cover - unused
-        return False
-
-    def count(self) -> int:
-        return sum(len(v) for v in self._results_by_query.values())
 
 
 _INITIAL_RESULTS = [
@@ -89,32 +81,32 @@ class TestIterativeOff:
     def test_default_iterative_false_makes_no_assess_calls_and_matches_single_shot(
         self, fake_complete
     ):
-        memory = _FakeMemory({"How does billing work?": _INITIAL_RESULTS})
+        pipeline = _FakePipeline({"How does billing work?": _INITIAL_RESULTS})
 
-        single_shot = answer_question("How does billing work?", memory)
+        single_shot = answer_question("How does billing work?", pipeline)
         # Reset the fake so we can call again for the "iterative=False, explicit" case.
-        memory2 = _FakeMemory({"How does billing work?": _INITIAL_RESULTS})
-        explicit_off = answer_question("How does billing work?", memory2, iterative=False)
+        pipeline2 = _FakePipeline({"How does billing work?": _INITIAL_RESULTS})
+        explicit_off = answer_question("How does billing work?", pipeline2, iterative=False)
 
         assert single_shot == explicit_off
         assert len(fake_complete.calls) == 2  # one synthesis call per invocation
-        assert memory.calls == [("How does billing work?", 8)]
+        assert pipeline.calls == [("How does billing work?", 8)]
 
 
 class TestIterativeLoop:
     def test_stops_when_assessor_says_sufficient(self, fake_complete):
-        memory = _FakeMemory({"How does billing work?": _INITIAL_RESULTS})
+        pipeline = _FakePipeline({"How does billing work?": _INITIAL_RESULTS})
         fake_complete.state["replies"] = [_assess_reply(True, None)]
 
-        result = answer_question("How does billing work?", memory, iterative=True)
+        result = answer_question("How does billing work?", pipeline, iterative=True)
 
         assert result.confidence == "high"
         # 1 retrieval call, 1 assess call, 1 synthesis call.
-        assert memory.calls == [("How does billing work?", 8)]
+        assert pipeline.calls == [("How does billing work?", 8)]
         assert len(fake_complete.calls) == 2
 
     def test_followup_retrieval_reaches_final_pool_deduped(self, fake_complete):
-        memory = _FakeMemory(
+        pipeline = _FakePipeline(
             {
                 "How does billing work?": _INITIAL_RESULTS,
                 "refund policy": _FOLLOWUP_RESULTS,
@@ -125,9 +117,9 @@ class TestIterativeLoop:
             _assess_reply(True, None),
         ]
 
-        answer_question("How does billing work?", memory, iterative=True, max_rounds=3)
+        answer_question("How does billing work?", pipeline, iterative=True, max_rounds=3)
 
-        assert memory.calls == [
+        assert pipeline.calls == [
             ("How does billing work?", 8),
             ("refund policy", 8),
         ]
@@ -139,7 +131,7 @@ class TestIterativeLoop:
         assert synthesis_prompt.count("Billing is monthly.") == 1
 
     def test_stops_at_max_rounds_even_if_always_insufficient(self, fake_complete):
-        memory = _FakeMemory(
+        pipeline = _FakePipeline(
             {
                 "How does billing work?": _INITIAL_RESULTS,
                 "refund policy": _FOLLOWUP_RESULTS,
@@ -153,10 +145,10 @@ class TestIterativeLoop:
             _assess_reply(False, "refund policy"),
         ]
 
-        answer_question("How does billing work?", memory, iterative=True, max_rounds=3)
+        answer_question("How does billing work?", pipeline, iterative=True, max_rounds=3)
 
         # max_rounds=3 -> retrieval rounds: initial + 2 followups = 3 total.
-        assert memory.calls == [
+        assert pipeline.calls == [
             ("How does billing work?", 8),
             ("refund policy", 8),
             ("refund policy", 8),
@@ -165,19 +157,19 @@ class TestIterativeLoop:
         assert len(fake_complete.calls) == 3
 
     def test_bad_assessor_reply_treated_as_sufficient_stops_loop(self, fake_complete):
-        memory = _FakeMemory({"How does billing work?": _INITIAL_RESULTS})
+        pipeline = _FakePipeline({"How does billing work?": _INITIAL_RESULTS})
         fake_complete.state["replies"] = ["not json at all, just prose"]
 
-        result = answer_question("How does billing work?", memory, iterative=True)
+        result = answer_question("How does billing work?", pipeline, iterative=True)
 
         assert result.confidence == "high"
-        assert memory.calls == [("How does billing work?", 8)]
+        assert pipeline.calls == [("How does billing work?", 8)]
         assert len(fake_complete.calls) == 2  # 1 assess (bad) + 1 synthesis
 
     def test_empty_retrieval_skips_iterative_loop_entirely(self, fake_complete):
-        memory = _FakeMemory({})
+        pipeline = _FakePipeline({})
 
-        result = answer_question("What is our refund policy?", memory, iterative=True)
+        result = answer_question("What is our refund policy?", pipeline, iterative=True)
 
         assert result.confidence == "low"
         assert not fake_complete.calls  # no assess, no synthesis call

@@ -234,49 +234,22 @@ def _parse_sources(raw: list[str] | None) -> list[Source] | None:
     return sources
 
 
-def _build_reranking_memory(
-    root: str,
-    sources: list[Source] | None,
-    rerank_name: str,
-    *,
-    contextual: bool = False,
-    model: str | None = None,
-):
-    """Build the retrieval memory: ingest + (optionally) contextualize, then
-    wrap with a reranker when `--rerank` isn't "none". Always returns a store
-    (no double-build in callers). See HTC_RERANKER / HTC_CONTEXTUAL_RETRIEVAL."""
-    from .world_model.build import build_memory
-
-    root_path = Path(root).expanduser().resolve()
-    store = build_memory(
-        sources or FilesystemAdapter(str(root_path)).sources(),
-        root_path,
-        contextual=contextual,
-        model=model,
-    )
-    if rerank_name != "none":
-        from .world_model.rerank import RerankingMemoryStore, get_reranker
-
-        store = RerankingMemoryStore(store, get_reranker(rerank_name))
-    return store
-
-
 def _cmd_handbook(args: argparse.Namespace) -> int:
     from .handbook import DRAFT_NAME, generate_handbook
+    from .world_model.retrieval import build_pipeline
 
     start = time.perf_counter()
     sources = _parse_sources(args.sources)
     print(f"generating handbook for {args.root} ...")
-    memory = _build_reranking_memory(
-        args.root, sources, args.rerank, contextual=args.contextual, model=args.model
-    )
-    generate_handbook(
+    pipeline = build_pipeline(
         args.root,
-        sources=sources,
-        model=args.model,
-        memory=memory,
+        sources,
+        rerank=args.rerank,
         query_transform=args.query_transform,
+        contextual=args.contextual,
+        model=args.model,
     )
+    generate_handbook(args.root, pipeline, model=args.model)
     draft = Path(args.root).expanduser().resolve() / DRAFT_NAME
     print(f"handbook -> {draft}")
     history.record_run(args.root, "handbook", {"num_sources": len(sources) if sources else 0})
@@ -293,17 +266,16 @@ def _cmd_handbook(args: argparse.Namespace) -> int:
 
 def _cmd_studio(args: argparse.Namespace) -> int:
     from .world_model.render import generate_diagram, generate_podcast_script, render_audio
+    from .world_model.retrieval import build_pipeline
 
     start = time.perf_counter()
     sources = _parse_sources(args.sources)
     root_path = Path(args.root).expanduser().resolve()
     print(f"generating {args.kind} studio artifact for {args.root} ...")
-    memory = _build_reranking_memory(args.root, sources, args.rerank)
+    pipeline = build_pipeline(args.root, sources, rerank=args.rerank, model=args.model)
 
     if args.kind == "podcast":
-        script = generate_podcast_script(
-            args.root, sources=sources, model=args.model, memory=memory
-        )
+        script = generate_podcast_script(args.root, pipeline, model=args.model)
         out = root_path / ".htc" / "studio" / "overview-script.md"
         print(f"podcast script -> {out}")
         audio_out = root_path / ".htc" / "studio" / "overview.mp3"
@@ -313,9 +285,7 @@ def _cmd_studio(args: argparse.Namespace) -> int:
         else:
             print("script only (set HTC_TTS_* to render audio)")
     else:
-        generate_diagram(
-            args.root, sources=sources, model=args.model, kind=args.kind, memory=memory
-        )
+        generate_diagram(args.root, pipeline, model=args.model, kind=args.kind)
         out = root_path / ".htc" / "studio" / "architecture.mmd.md"
         print(f"{args.kind} diagram -> {out}")
 
@@ -332,23 +302,19 @@ def _cmd_studio(args: argparse.Namespace) -> int:
 
 
 def _cmd_wiki(args: argparse.Namespace) -> int:
-    from .world_model.build import build_memory
+    from .world_model.retrieval import build_pipeline
     from .world_model.wiki import add_wiki_to_memory, build_wiki, write_wiki_files
 
     start = time.perf_counter()
     root_path = Path(args.root).expanduser().resolve()
     topics = [t.strip() for t in args.topics.split(",") if t.strip()] if args.topics else None
     print(f"building wiki for {args.root} ...")
-    store = build_memory(FilesystemAdapter(str(root_path)).sources(), root_path)
-    if args.rerank != "none":
-        from .world_model.rerank import RerankingMemoryStore, get_reranker
-
-        store = RerankingMemoryStore(store, get_reranker(args.rerank))
-    pages = build_wiki(store, topics=topics, model=args.model)
+    pipeline = build_pipeline(args.root, rerank=args.rerank, model=args.model)
+    pages = build_wiki(pipeline, topics=topics, model=args.model)
     if not pages:
         print("no topics inferred and none provided — nothing to build.")
         return 1
-    add_wiki_to_memory(pages, store)
+    add_wiki_to_memory(pages, pipeline.store)
     written = write_wiki_files(pages, root_path)
     for path in written:
         print(f"  wiki page -> {path}")
@@ -366,30 +332,27 @@ def _cmd_wiki(args: argparse.Namespace) -> int:
 
 
 def _cmd_ask(args: argparse.Namespace) -> int:
-    from .world_model.graph import build_graph
-    from .world_model.ingest import ingest_sources
+    from .world_model.retrieval import build_pipeline
     from .world_model.synthesis import answer_question
 
     start = time.perf_counter()
-    root_path = Path(args.root).expanduser().resolve()
-    sources = _parse_sources(args.sources) or FilesystemAdapter(str(root_path)).sources()
+    sources = _parse_sources(args.sources)
 
-    memory = _build_reranking_memory(
-        args.root, sources, args.rerank, contextual=args.contextual, model=args.model
+    pipeline = build_pipeline(
+        args.root,
+        sources,
+        rerank=args.rerank,
+        query_transform=args.query_transform,
+        contextual=args.contextual,
+        graph=args.graph,
+        model=args.model,
     )
-
-    graph = None
-    if args.graph:
-        chunks = ingest_sources(sources, root=root_path).all_chunks()
-        graph = build_graph(chunks, root_path)
 
     print(f"synthesizing an answer for {args.root} ...")
     answer = answer_question(
         args.question,
-        memory,
-        graph=graph,
+        pipeline,
         model=args.model,
-        query_transform=args.query_transform,
         iterative=args.iterative,
         max_rounds=args.max_rounds,
     )

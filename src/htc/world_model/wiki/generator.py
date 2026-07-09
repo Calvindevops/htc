@@ -18,6 +18,7 @@ from pathlib import Path
 from ...llm import complete, extract_json
 from ..ingest.model import SourceChunk, chunk_id
 from ..memory import MemoryStore, SearchResult
+from ..retrieval import RetrievalPipeline
 
 WIKI_DIR = ".htc/wiki"
 SEARCH_K = 8
@@ -61,9 +62,9 @@ class WikiPage:
     source_paths: list[str]
 
 
-def _infer_topics(memory: MemoryStore, model: str | None) -> list[str]:
+def _infer_topics(pipeline: RetrievalPipeline, model: str | None) -> list[str]:
     """Ask the model to propose topics from a broad sample of the memory."""
-    results = memory.search("overview architecture components purpose", k=SEARCH_K)
+    results = pipeline.retrieve("overview architecture components purpose", SEARCH_K)
     if not results:
         return []
     lines = ["Propose wiki topics for this project, from the following sources."]
@@ -88,8 +89,8 @@ def _page_prompt(title: str, results: list[SearchResult]) -> str:
     return "\n\n".join(lines)
 
 
-def _build_page(title: str, memory: MemoryStore, model: str | None) -> WikiPage:
-    results = memory.search(title, k=SEARCH_K)
+def _build_page(title: str, pipeline: RetrievalPipeline, model: str | None) -> WikiPage:
+    results = pipeline.retrieve(title, SEARCH_K)
     if not results:
         return WikiPage(title=title, body_md=UNKNOWN, source_paths=[])
     response = complete(
@@ -105,14 +106,14 @@ def _build_page(title: str, memory: MemoryStore, model: str | None) -> WikiPage:
 
 
 def build_wiki(
-    memory: MemoryStore,
+    pipeline: RetrievalPipeline,
     topics: list[str] | None = None,
     model: str | None = None,
 ) -> list[WikiPage]:
     """Derive (or accept) topics, retrieve grounding chunks per topic, and ask
     the model to synthesize one concise, cited page per topic."""
-    resolved_topics = topics if topics else _infer_topics(memory, model)
-    return [_build_page(title, memory, model) for title in resolved_topics]
+    resolved_topics = topics if topics else _infer_topics(pipeline, model)
+    return [_build_page(title, pipeline, model) for title in resolved_topics]
 
 
 def add_wiki_to_memory(pages: list[WikiPage], memory: MemoryStore) -> None:

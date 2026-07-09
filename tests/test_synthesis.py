@@ -22,25 +22,18 @@ def _chunk(id_: str, source_path: str, text: str) -> SourceChunk:
     )
 
 
-class _FakeMemory:
-    """Returns a fixed set of `SearchResult`s (or none), recording every call."""
+class _FakePipeline:
+    """Returns a fixed set of `SearchResult`s (or none) from `.retrieve`,
+    recording every call; carries an optional `graph` like a real pipeline."""
 
-    def __init__(self, results: list[SearchResult]):
+    def __init__(self, results: list[SearchResult], graph=None):
         self._results = results
+        self.graph = graph
         self.calls: list[tuple[str, int]] = []
 
-    def search(self, query: str, k: int = 5, graph=None) -> list[SearchResult]:
+    def retrieve(self, query: str, k: int = 5) -> list[SearchResult]:
         self.calls.append((query, k))
         return self._results[:k]
-
-    def add_chunks(self, chunks):  # pragma: no cover - unused by these tests
-        raise NotImplementedError
-
-    def has_source(self, path: str) -> bool:  # pragma: no cover - unused
-        return False
-
-    def count(self) -> int:
-        return len(self._results)
 
 
 _GROUNDED_RESULTS = [
@@ -77,9 +70,9 @@ def fake_complete(monkeypatch):
 
 class TestAnswerQuestion:
     def test_returns_populated_answer_from_retrieved_chunks(self, fake_complete):
-        memory = _FakeMemory(_GROUNDED_RESULTS)
+        pipeline = _FakePipeline(_GROUNDED_RESULTS)
 
-        result = answer_question("How does billing work?", memory)
+        result = answer_question("How does billing work?", pipeline)
 
         assert isinstance(result, Answer)
         assert result.question == "How does billing work?"
@@ -87,13 +80,13 @@ class TestAnswerQuestion:
         assert result.citations == ["docs/billing.md", "src/billing.py"]
         assert result.gaps == ["Refund policy is not covered."]
         assert result.confidence == "medium"
-        assert memory.calls  # retrieval actually happened
+        assert pipeline.calls  # retrieval actually happened
         assert "docs/billing.md" in fake_complete.calls[0]
 
     def test_empty_retrieval_returns_low_confidence_dont_know(self, fake_complete):
-        memory = _FakeMemory([])
+        pipeline = _FakePipeline([])
 
-        result = answer_question("What is our refund policy?", memory)
+        result = answer_question("What is our refund policy?", pipeline)
 
         assert result.confidence == "low"
         assert result.citations == []
@@ -103,9 +96,9 @@ class TestAnswerQuestion:
 
     def test_garbled_non_json_reply_degrades_to_low_confidence_fallback(self, fake_complete):
         fake_complete.state["reply"] = "not json at all, just prose"
-        memory = _FakeMemory(_GROUNDED_RESULTS)
+        pipeline = _FakePipeline(_GROUNDED_RESULTS)
 
-        result = answer_question("How does billing work?", memory)
+        result = answer_question("How does billing work?", pipeline)
 
         assert result.confidence == "low"
         assert result.citations == []
@@ -113,16 +106,15 @@ class TestAnswerQuestion:
 
     def test_non_dict_json_reply_degrades_to_low_confidence_fallback(self, fake_complete):
         fake_complete.state["reply"] = json.dumps(["billing", "is", "monthly"])
-        memory = _FakeMemory(_GROUNDED_RESULTS)
+        pipeline = _FakePipeline(_GROUNDED_RESULTS)
 
-        result = answer_question("How does billing work?", memory)
+        result = answer_question("How does billing work?", pipeline)
 
         assert result.confidence == "low"
         assert result.citations == []
         assert result.gaps
 
     def test_graph_context_reaches_the_prompt(self, fake_complete):
-        memory = _FakeMemory(_GROUNDED_RESULTS)
         graph = KnowledgeGraph()
         graph.add_entities(
             [
@@ -130,8 +122,9 @@ class TestAnswerQuestion:
                 Entity(id="term:billing", name="billing", kind="term", mentions=5),
             ]
         )
+        pipeline = _FakePipeline(_GROUNDED_RESULTS, graph=graph)
 
-        answer_question("How does billing work?", memory, graph=graph)
+        answer_question("How does billing work?", pipeline)
 
         prompt = fake_complete.calls[0]
         assert "KNOWLEDGE GRAPH" in prompt

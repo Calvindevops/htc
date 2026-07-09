@@ -12,10 +12,8 @@ nothing, no LLM call is made at all; the caller gets an honest "don't know".
 from __future__ import annotations
 
 from ...llm import LLMError, complete, extract_json
-from ..graph.graph import KnowledgeGraph
-from ..memory.store import MemoryStore, SearchResult
-from ..query import retrieve_with_transform
-from ..rerank.base import Reranker
+from ..memory.store import SearchResult
+from ..retrieval import RetrievalPipeline
 from .model import Answer
 
 SEARCH_K = 8
@@ -118,13 +116,10 @@ def _merge_chunks(pool: list[SearchResult], new_results: list[SearchResult]) -> 
 def _iterate_retrieval(
     query: str,
     results: list[SearchResult],
-    memory: MemoryStore,
+    pipeline: RetrievalPipeline,
     *,
-    graph: KnowledgeGraph | None,
-    reranker: Reranker | None,
     model: str | None,
     k: int,
-    query_transform: str | None,
     max_rounds: int,
 ) -> list[SearchResult]:
     """Agentic retrieval loop: assess whether `results` sufficiently answers
@@ -132,21 +127,14 @@ def _iterate_retrieval(
     new chunks into the pool (deduped by chunk id). Stops when the assessor
     says sufficient, returns no followup, or `max_rounds` retrieval rounds
     (the initial one plus followups) have been used."""
+    graph = pipeline.graph
     graph_entities = graph.subgraph_for_query(query, k=k) if graph is not None else []
     rounds_used = 1
     while rounds_used < max_rounds:
         sufficient, followup_query = _assess_sufficiency(query, results, graph_entities, model)
         if sufficient or not followup_query:
             break
-        followup_results = retrieve_with_transform(
-            memory,
-            followup_query,
-            k=k,
-            strategy=query_transform,
-            model=model,
-            graph=graph,
-            reranker=reranker,
-        )
+        followup_results = pipeline.retrieve(followup_query, k)
         results = _merge_chunks(results, followup_results)
         rounds_used += 1
     return results
@@ -154,26 +142,18 @@ def _iterate_retrieval(
 
 def answer_question(
     query: str,
-    memory: MemoryStore,
+    pipeline: RetrievalPipeline,
     *,
-    graph: KnowledgeGraph | None = None,
-    reranker: Reranker | None = None,
     model: str | None = None,
     k: int = SEARCH_K,
-    query_transform: str | None = None,
     iterative: bool = False,
     max_rounds: int = 3,
 ) -> Answer:
-    """Retrieve across `memory` (hybrid + optional rerank + optional graph +
-    optional query transformation), then ONE LLM call to synthesize a
+    """Retrieve via `pipeline` (hybrid + whatever rerank/graph/query-transform
+    the pipeline was configured with), then ONE LLM call to synthesize a
     grounded, cited `Answer` with an explicit gap analysis. If retrieval is
     empty, returns a low-confidence "don't know" `Answer` with no LLM call at
     all.
-
-    `query_transform` (default: "none", see `htc.world_model.query`) opts
-    into an LLM-driven retrieval-query transform ("expand"/"hyde"/
-    "decompose"/"multi") before the search above; "none" makes no extra LLM
-    call and behaves exactly as before.
 
     `iterative` (default: False, zero extra LLM calls, current behavior
     unchanged) opts into agentic/iterative retrieval: after the initial
@@ -181,26 +161,22 @@ def answer_question(
     sufficient; if not, it proposes a followup query, which is retrieved and
     merged into the pool (deduped by chunk id), up to `max_rounds` retrieval
     rounds total, before the final synthesis call below runs."""
-    results = retrieve_with_transform(
-        memory, query, k=k, strategy=query_transform, model=model, graph=graph, reranker=reranker
-    )
+    results = pipeline.retrieve(query, k)
 
     if iterative and results:
         results = _iterate_retrieval(
             query,
             results,
-            memory,
-            graph=graph,
-            reranker=reranker,
+            pipeline,
             model=model,
             k=k,
-            query_transform=query_transform,
             max_rounds=max_rounds,
         )
 
     if not results:
         return _fallback(query, "no relevant chunks were found in memory for this question")
 
+    graph = pipeline.graph
     graph_entities = graph.subgraph_for_query(query, k=k) if graph is not None else []
     prompt = f"Question: {query}\n\n{_context_block(results, graph_entities)}"
     response = complete(ANSWER_SYSTEM, [{"role": "user", "content": prompt}], model=model)

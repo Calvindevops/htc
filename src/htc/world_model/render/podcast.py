@@ -10,11 +10,8 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from ...adapters.base import Source
-from ...adapters.filesystem import FilesystemAdapter
 from ...llm import complete
-from ..build import build_memory
-from ..memory import MemoryStore
+from ..retrieval import RetrievalPipeline
 
 STUDIO_DIR = ".htc/studio"
 SCRIPT_FILENAME = "overview-script.md"
@@ -52,21 +49,17 @@ def _prompt(root_name: str, results) -> str:
 
 def generate_podcast_script(
     root: str | Path,
+    pipeline: RetrievalPipeline,
     *,
-    sources: list[Source] | None = None,
     model: str | None = None,
-    memory: MemoryStore | None = None,
 ) -> str:
     """Retrieve the most relevant chunks and ask the model to write a
     2-host audio-overview script grounded in them. Writes
     `<root>/.htc/studio/overview-script.md` and returns the script text.
     """
     root_path = Path(root).expanduser().resolve()
-    store = memory or build_memory(
-        sources or FilesystemAdapter(str(root_path)).sources(), root_path
-    )
 
-    results = store.search(QUERY, k=SEARCH_K)
+    results = pipeline.retrieve(QUERY, SEARCH_K)
     if not results:
         script = NO_SCRIPT
     else:

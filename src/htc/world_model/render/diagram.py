@@ -10,11 +10,9 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from ...adapters.base import Source
-from ...adapters.filesystem import FilesystemAdapter
 from ...llm import complete
-from ..build import build_memory
-from ..memory import MemoryStore, SearchResult
+from ..memory import SearchResult
+from ..retrieval import RetrievalPipeline
 
 STUDIO_DIR = ".htc/studio"
 DIAGRAM_FILENAME = "architecture.mmd.md"
@@ -74,10 +72,9 @@ def _extract_fence(text: str, kind: str) -> str | None:
 
 def generate_diagram(
     root: str | Path,
+    pipeline: RetrievalPipeline,
     *,
-    sources: list[Source] | None = None,
     model: str | None = None,
-    memory: MemoryStore | None = None,
     kind: str = "architecture",
 ) -> str:
     """Retrieve the most relevant chunks for `kind` and ask the model to draw a
@@ -90,11 +87,8 @@ def generate_diagram(
     if kind not in _KIND_QUERIES:
         raise ValueError(f"unknown diagram kind '{kind}' (architecture | mindmap)")
     root_path = Path(root).expanduser().resolve()
-    store = memory or build_memory(
-        sources or FilesystemAdapter(str(root_path)).sources(), root_path
-    )
 
-    results = store.search(_KIND_QUERIES[kind], k=SEARCH_K)
+    results = pipeline.retrieve(_KIND_QUERIES[kind], SEARCH_K)
     title = f"# {kind.title()} Diagram\n\n"
     if not results:
         markdown = title + NO_DIAGRAM + "\n"

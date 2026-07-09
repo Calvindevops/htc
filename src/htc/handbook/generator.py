@@ -13,12 +13,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-from ..adapters.base import Source
-from ..adapters.filesystem import FilesystemAdapter
 from ..llm import complete
-from ..world_model.build import build_memory
-from ..world_model.memory import MemoryStore, SearchResult
-from ..world_model.query import retrieve_with_transform
+from ..world_model.memory import SearchResult
+from ..world_model.retrieval import RetrievalPipeline
 
 DRAFT_NAME = "HANDBOOK.md.htc-draft"
 SEARCH_K = 5
@@ -97,12 +94,8 @@ def _section_prompt(section: Section, results: list[SearchResult]) -> str:
     return "\n\n".join(lines)
 
 
-def _write_section(
-    section: Section, store: MemoryStore, model: str | None, query_transform: str | None
-) -> str:
-    results = retrieve_with_transform(
-        store, section.query, k=SEARCH_K, strategy=query_transform, model=model
-    )
+def _write_section(section: Section, pipeline: RetrievalPipeline, model: str | None) -> str:
+    results = pipeline.retrieve(section.query, SEARCH_K)
     if not results:
         return NO_GROUNDING
     prompt = _section_prompt(section, results)
@@ -115,31 +108,21 @@ def _write_section(
 
 def generate_handbook(
     root: str | Path,
+    pipeline: RetrievalPipeline,
     *,
-    sources: list[Source] | None = None,
     model: str | None = None,
-    memory: MemoryStore | None = None,
-    query_transform: str | None = None,
 ) -> str:
-    """Build (or reuse) the world-model memory over `root` and `sources`, then
-    write a structured onboarding handbook, one section at a time, grounded in
-    the most relevant retrieved chunks per section.
-
-    `query_transform` (default: "none", see `htc.world_model.query`) opts
-    into an LLM-driven retrieval-query transform per section; "none" makes no
-    extra LLM call and retrieves exactly as before.
+    """Write a structured onboarding handbook, one section at a time, grounded
+    in the most relevant chunks `pipeline` retrieves per section.
 
     Writes `<root>/HANDBOOK.md.htc-draft` (never touches an existing
     `HANDBOOK.md`) and returns the markdown body.
     """
     root_path = Path(root).expanduser().resolve()
-    store = memory or build_memory(
-        sources or FilesystemAdapter(str(root_path)).sources(), root_path
-    )
 
     parts = [f"# {root_path.name} Handbook\n"]
     for section in SECTIONS:
-        body = _write_section(section, store, model, query_transform)
+        body = _write_section(section, pipeline, model)
         parts.append(f"## {section.heading}\n\n{body}\n")
     markdown = "\n".join(parts) + "\n"
 

@@ -20,28 +20,19 @@ def _chunk(id_: str, source_path: str, text: str) -> SourceChunk:
     )
 
 
-class _FakeMemory:
-    """Records every `search` call; returns one grounded chunk unless the
+class _FakePipeline:
+    """Records every `.retrieve` call; returns one grounded chunk unless the
     query is in `empty_for`."""
 
     def __init__(self, empty_for: set[str] | None = None):
         self.queries: list[str] = []
         self._empty_for = empty_for or set()
 
-    def search(self, query: str, k: int = 5) -> list[SearchResult]:
+    def retrieve(self, query: str, k: int = 5) -> list[SearchResult]:
         self.queries.append(query)
         if query in self._empty_for:
             return []
         return [SearchResult(chunk=_chunk("a", "docs/notes.md", "some grounding text"), score=1.0)]
-
-    def add_chunks(self, chunks):  # pragma: no cover - unused by these tests
-        raise NotImplementedError
-
-    def has_source(self, path: str) -> bool:  # pragma: no cover - unused
-        return False
-
-    def count(self) -> int:  # pragma: no cover - unused
-        return 1
 
 
 @pytest.fixture
@@ -58,58 +49,58 @@ def fake_complete(monkeypatch):
 
 class TestBuildWiki:
     def test_produces_a_page_per_explicit_topic_grounded_in_retrieved_chunks(self, fake_complete):
-        memory = _FakeMemory()
-        pages = build_wiki(memory, topics=["Auth", "Billing"], model="test-model")
+        pipeline = _FakePipeline()
+        pages = build_wiki(pipeline, topics=["Auth", "Billing"], model="test-model")
 
         assert [p.title for p in pages] == ["Auth", "Billing"]
-        assert memory.queries == ["Auth", "Billing"]
+        assert pipeline.queries == ["Auth", "Billing"]
         for page in pages:
             assert page.source_paths == ["docs/notes.md"]
             assert "synthesized page body" in page.body_md
         assert len(fake_complete) == 2
 
     def test_infers_topics_from_memory_when_none_given(self, monkeypatch):
-        memory = _FakeMemory()
+        pipeline = _FakePipeline()
         monkeypatch.setattr(
             "htc.world_model.wiki.generator.complete",
             lambda system, messages, model=None: LLMResponse(text='["Auth", "Billing"]'),
         )
 
-        pages = build_wiki(memory)
+        pages = build_wiki(pipeline)
 
         # First call is the topic-inference search; the rest ground each page.
-        assert memory.queries[0] == "overview architecture components purpose"
+        assert pipeline.queries[0] == "overview architecture components purpose"
         assert [p.title for p in pages] == ["Auth", "Billing"]
 
     def test_topic_with_no_grounding_returns_unknown_page(self):
-        memory = _FakeMemory(empty_for={"Nonexistent"})
-        pages = build_wiki(memory, topics=["Nonexistent"])
+        pipeline = _FakePipeline(empty_for={"Nonexistent"})
+        pages = build_wiki(pipeline, topics=["Nonexistent"])
 
         assert pages == [WikiPage(title="Nonexistent", body_md=UNKNOWN, source_paths=[])]
 
     def test_model_reply_of_unknown_yields_unknown_page(self, monkeypatch):
-        memory = _FakeMemory()
+        pipeline = _FakePipeline()
         monkeypatch.setattr(
             "htc.world_model.wiki.generator.complete",
             lambda system, messages, model=None: LLMResponse(text="unknown"),
         )
 
-        pages = build_wiki(memory, topics=["Auth"])
+        pages = build_wiki(pipeline, topics=["Auth"])
 
         assert pages == [WikiPage(title="Auth", body_md=UNKNOWN, source_paths=[])]
 
     def test_empty_model_reply_raises(self, monkeypatch):
-        memory = _FakeMemory()
+        pipeline = _FakePipeline()
         monkeypatch.setattr(
             "htc.world_model.wiki.generator.complete",
             lambda system, messages, model=None: LLMResponse(text="   "),
         )
         with pytest.raises(RuntimeError, match="empty"):
-            build_wiki(memory, topics=["Auth"])
+            build_wiki(pipeline, topics=["Auth"])
 
     def test_no_topics_inferred_and_none_given_yields_no_pages(self, monkeypatch):
-        memory = _FakeMemory(empty_for={"overview architecture components purpose"})
-        pages = build_wiki(memory)
+        pipeline = _FakePipeline(empty_for={"overview architecture components purpose"})
+        pages = build_wiki(pipeline)
         assert pages == []
 
 
