@@ -14,8 +14,8 @@ from __future__ import annotations
 from ...llm import LLMError, complete, extract_json
 from ..graph.graph import KnowledgeGraph
 from ..memory.store import MemoryStore, SearchResult
+from ..query import retrieve_with_transform
 from ..rerank.base import Reranker
-from ..rerank.search import search_with_rerank
 from .model import Answer
 
 SEARCH_K = 8
@@ -71,12 +71,21 @@ def answer_question(
     reranker: Reranker | None = None,
     model: str | None = None,
     k: int = SEARCH_K,
+    query_transform: str | None = None,
 ) -> Answer:
-    """Retrieve across `memory` (hybrid + optional rerank + optional graph),
-    then ONE LLM call to synthesize a grounded, cited `Answer` with an
-    explicit gap analysis. If retrieval is empty, returns a low-confidence
-    "don't know" `Answer` with no LLM call at all."""
-    results = search_with_rerank(memory, query, k=k, reranker=reranker, graph=graph)
+    """Retrieve across `memory` (hybrid + optional rerank + optional graph +
+    optional query transformation), then ONE LLM call to synthesize a
+    grounded, cited `Answer` with an explicit gap analysis. If retrieval is
+    empty, returns a low-confidence "don't know" `Answer` with no LLM call at
+    all.
+
+    `query_transform` (default: "none", see `htc.world_model.query`) opts
+    into an LLM-driven retrieval-query transform ("expand"/"hyde"/
+    "decompose"/"multi") before the search above; "none" makes no extra LLM
+    call and behaves exactly as before."""
+    results = retrieve_with_transform(
+        memory, query, k=k, strategy=query_transform, model=model, graph=graph, reranker=reranker
+    )
     if not results:
         return _fallback(query, "no relevant chunks were found in memory for this question")
 

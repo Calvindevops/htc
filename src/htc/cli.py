@@ -255,7 +255,13 @@ def _cmd_handbook(args: argparse.Namespace) -> int:
     sources = _parse_sources(args.sources)
     print(f"generating handbook for {args.root} ...")
     memory = _build_reranking_memory(args.root, sources, args.rerank)
-    generate_handbook(args.root, sources=sources, model=args.model, memory=memory)
+    generate_handbook(
+        args.root,
+        sources=sources,
+        model=args.model,
+        memory=memory,
+        query_transform=args.query_transform,
+    )
     draft = Path(args.root).expanduser().resolve() / DRAFT_NAME
     print(f"handbook -> {draft}")
     history.record_run(args.root, "handbook", {"num_sources": len(sources) if sources else 0})
@@ -364,7 +370,9 @@ def _cmd_ask(args: argparse.Namespace) -> int:
         graph = build_graph(chunks, root_path)
 
     print(f"synthesizing an answer for {args.root} ...")
-    answer = answer_question(args.question, memory, graph=graph, model=args.model)
+    answer = answer_question(
+        args.question, memory, graph=graph, model=args.model, query_transform=args.query_transform
+    )
 
     print(f"\n{answer.answer_md}\n")
     print("Sources:")
@@ -664,6 +672,13 @@ def main(argv: list[str] | None = None) -> int:
         help="rerank retrieved chunks for precision before writing (default none; "
         "BYO key via env — see HTC_RERANKER)",
     )
+    p_hand.add_argument(
+        "--query-transform",
+        default="none",
+        choices=("none", "expand", "hyde", "decompose", "multi"),
+        help="transform each section's retrieval query before searching (default none, "
+        "no extra LLM call; see HTC_QUERY_TRANSFORM)",
+    )
     p_hand.set_defaults(func=_cmd_handbook)
 
     p_studio = sub.add_parser(
@@ -734,6 +749,13 @@ def main(argv: list[str] | None = None) -> int:
         "--graph",
         action="store_true",
         help="also build the knowledge graph and use it as an extra retrieval signal/context",
+    )
+    p_ask.add_argument(
+        "--query-transform",
+        default="none",
+        choices=("none", "expand", "hyde", "decompose", "multi"),
+        help="transform the retrieval query before searching (default none, no extra "
+        "LLM call; see HTC_QUERY_TRANSFORM)",
     )
     p_ask.set_defaults(func=_cmd_ask)
 

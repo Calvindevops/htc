@@ -18,6 +18,7 @@ from ..adapters.filesystem import FilesystemAdapter
 from ..llm import complete
 from ..world_model.build import build_memory
 from ..world_model.memory import MemoryStore, SearchResult
+from ..world_model.query import retrieve_with_transform
 
 DRAFT_NAME = "HANDBOOK.md.htc-draft"
 SEARCH_K = 5
@@ -96,8 +97,12 @@ def _section_prompt(section: Section, results: list[SearchResult]) -> str:
     return "\n\n".join(lines)
 
 
-def _write_section(section: Section, store: MemoryStore, model: str | None) -> str:
-    results = store.search(section.query, k=SEARCH_K)
+def _write_section(
+    section: Section, store: MemoryStore, model: str | None, query_transform: str | None
+) -> str:
+    results = retrieve_with_transform(
+        store, section.query, k=SEARCH_K, strategy=query_transform, model=model
+    )
     if not results:
         return NO_GROUNDING
     prompt = _section_prompt(section, results)
@@ -114,10 +119,15 @@ def generate_handbook(
     sources: list[Source] | None = None,
     model: str | None = None,
     memory: MemoryStore | None = None,
+    query_transform: str | None = None,
 ) -> str:
     """Build (or reuse) the world-model memory over `root` and `sources`, then
     write a structured onboarding handbook, one section at a time, grounded in
     the most relevant retrieved chunks per section.
+
+    `query_transform` (default: "none", see `htc.world_model.query`) opts
+    into an LLM-driven retrieval-query transform per section; "none" makes no
+    extra LLM call and retrieves exactly as before.
 
     Writes `<root>/HANDBOOK.md.htc-draft` (never touches an existing
     `HANDBOOK.md`) and returns the markdown body.
@@ -129,7 +139,7 @@ def generate_handbook(
 
     parts = [f"# {root_path.name} Handbook\n"]
     for section in SECTIONS:
-        body = _write_section(section, store, model)
+        body = _write_section(section, store, model, query_transform)
         parts.append(f"## {section.heading}\n\n{body}\n")
     markdown = "\n".join(parts) + "\n"
 
