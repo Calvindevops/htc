@@ -153,7 +153,7 @@ class TestSearchWithRerank:
         reranked = search_with_rerank(store, "q", k=2, reranker=None)
 
         assert [r.chunk.id for r in reranked] == [r.chunk.id for r in direct]
-        assert store.search_calls == [{"query": "q", "k": 2}]
+        assert store.search_calls == [{"query": "q", "k": 2, "graph": None}]
 
     def test_noop_reranker_is_identical_to_plain_search(self):
         results = [_result("a", "a"), _result("b", "b"), _result("c", "c")]
@@ -162,7 +162,7 @@ class TestSearchWithRerank:
         reranked = search_with_rerank(store, "q", k=2, reranker=NoOpReranker())
 
         assert [r.chunk.id for r in reranked] == ["a", "b"]
-        assert store.search_calls == [{"query": "q", "k": 2}]
+        assert store.search_calls == [{"query": "q", "k": 2, "graph": None}]
 
     def test_reranker_expands_pool_then_truncates(self):
         results = [_result(str(i), str(i)) for i in range(30)]
@@ -175,5 +175,5 @@ class TestSearchWithRerank:
         reranked = search_with_rerank(store, "q", k=3, reranker=_ReverseReranker())
 
         # Default pool = max(k * 4, 20) = 20, so the pool is ids "0".."19".
-        assert store.search_calls == [{"query": "q", "k": 20}]
+        assert store.search_calls == [{"query": "q", "k": 20, "graph": None}]
         assert [r.chunk.id for r in reranked] == ["19", "18", "17"]

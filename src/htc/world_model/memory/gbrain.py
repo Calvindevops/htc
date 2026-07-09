@@ -14,9 +14,13 @@ import shutil
 import subprocess
 import tempfile
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from ..ingest.model import SourceChunk
 from .store import SearchResult
+
+if TYPE_CHECKING:
+    from ..graph.graph import KnowledgeGraph
 
 
 class MemoryBackendUnavailable(RuntimeError):
@@ -48,7 +52,9 @@ class GBrainMemoryStore:
             finally:
                 Path(tmp_path).unlink(missing_ok=True)
 
-    def search(self, query: str, k: int = 5) -> list[SearchResult]:
+    def search(
+        self, query: str, k: int = 5, graph: KnowledgeGraph | None = None
+    ) -> list[SearchResult]:
         result = subprocess.run(
             ["gbrain", "query", query, "--json"],
             check=True,

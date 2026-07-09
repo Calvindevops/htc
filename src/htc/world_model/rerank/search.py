@@ -10,8 +10,6 @@ can opt into reranking with no change to their retrieval code.
 
 from __future__ import annotations
 
-from typing import Any
-
 from ..graph import KnowledgeGraph
 from ..memory.store import MemoryStore, SearchResult
 from .base import NoOpReranker, Reranker
@@ -27,14 +25,10 @@ def _pool_size(k: int, rerank_pool: int | None) -> int:
 def _store_search(
     store: MemoryStore, query: str, k: int, graph: KnowledgeGraph | None
 ) -> list[SearchResult]:
-    """Call `store.search`, passing `graph` through only if the store's
-    `search` accepts it (only `LocalMemoryStore` does today)."""
-    if graph is not None:
-        try:
-            return store.search(query, k=k, graph=graph)
-        except TypeError:
-            pass
-    return store.search(query, k=k)
+    """Call `store.search`, forwarding `graph` — every `MemoryStore` accepts
+    the `graph` param explicitly (backends that don't use it simply ignore
+    it)."""
+    return store.search(query, k=k, graph=graph)
 
 
 def search_with_rerank(
@@ -75,14 +69,16 @@ class RerankingMemoryStore:
     def add_chunks(self, chunks) -> None:
         self._store.add_chunks(chunks)
 
-    def search(self, query: str, k: int = 5, **kwargs: Any) -> list[SearchResult]:
+    def search(
+        self, query: str, k: int = 5, graph: KnowledgeGraph | None = None
+    ) -> list[SearchResult]:
         return search_with_rerank(
             self._store,
             query,
             k=k,
             reranker=self._reranker,
             rerank_pool=self._rerank_pool,
-            graph=kwargs.get("graph"),
+            graph=graph,
         )
 
     def has_source(self, path: str) -> bool:

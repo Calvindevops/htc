@@ -19,10 +19,14 @@ from __future__ import annotations
 
 import os
 import warnings
+from typing import TYPE_CHECKING
 
 from ..ingest.model import SourceChunk
 from .gbrain import MemoryBackendUnavailable
 from .store import SearchResult
+
+if TYPE_CHECKING:
+    from ..graph.graph import KnowledgeGraph
 
 _DEFAULT_BASE_URL = "https://api.supermemory.ai"
 
@@ -70,7 +74,9 @@ class SupermemoryMemoryStore:
                         stacklevel=2,
                     )
 
-    def search(self, query: str, k: int = 5) -> list[SearchResult]:
+    def search(
+        self, query: str, k: int = 5, graph: KnowledgeGraph | None = None
+    ) -> list[SearchResult]:
         import httpx
 
         try:

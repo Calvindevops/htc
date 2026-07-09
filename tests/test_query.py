@@ -139,7 +139,7 @@ class TestRetrieveWithTransform:
         store = _FakeStore({"q": results_a})
         got = retrieve_with_transform(store, "q", k=5, strategy="none")
         assert got == results_a
-        assert store.search_calls == [{"query": "q", "k": 5}]
+        assert store.search_calls == [{"query": "q", "k": 5, "graph": None}]
 
     def test_none_is_the_default_strategy(self, monkeypatch):
         def _boom(*args, **kwargs):
@@ -156,7 +156,7 @@ class TestRetrieveWithTransform:
         store = _FakeStore({"hypothetical doc": [_result("a")]})
         got = retrieve_with_transform(store, "q", k=5, strategy="hyde")
         assert [r.chunk.id for r in got] == ["a"]
-        assert store.search_calls == [{"query": "hypothetical doc", "k": 5}]
+        assert store.search_calls == [{"query": "hypothetical doc", "k": 5, "graph": None}]
 
     def test_expand_retrieves_for_each_variant_and_fuses(self, fake_complete):
         fake_complete.state["reply"] = json.dumps(["q", "q alt"])

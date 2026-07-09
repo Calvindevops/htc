@@ -5,9 +5,12 @@ satisfy. `LocalMemoryStore` (self-contained, default) and `GBrainMemoryStore`
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
 
 from ..ingest.model import SourceChunk
+
+if TYPE_CHECKING:
+    from ..graph.graph import KnowledgeGraph
 
 
 @dataclass(frozen=True)
@@ -25,8 +28,12 @@ class MemoryStore(Protocol):
         """Add chunks to the store (persisted for later sessions)."""
         ...
 
-    def search(self, query: str, k: int = 5) -> list[SearchResult]:
-        """Return the `k` most relevant stored chunks for `query`."""
+    def search(
+        self, query: str, k: int = 5, graph: KnowledgeGraph | None = None
+    ) -> list[SearchResult]:
+        """Return the `k` most relevant stored chunks for `query`. `graph` is
+        an optional additional retrieval signal (see `LocalMemoryStore`'s
+        graph-boost); backends that don't support it simply ignore it."""
         ...
 
     def has_source(self, path: str) -> bool:

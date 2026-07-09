@@ -24,7 +24,7 @@ class _FakeMemory:
     def __init__(self):
         self.queries: list[str] = []
 
-    def search(self, query: str, k: int = 5) -> list[SearchResult]:
+    def search(self, query: str, k: int = 5, graph=None) -> list[SearchResult]:
         self.queries.append(query)
         return [SearchResult(chunk=_chunk("a", "docs/notes.md", "some grounding text"), score=1.0)]
 
