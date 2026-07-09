@@ -13,6 +13,7 @@ import asyncio
 import sys
 from pathlib import Path
 
+from .adapters.base import Source
 from .adapters.filesystem import FilesystemAdapter
 from .llm import LLMError
 from .sandbox import SandboxConfig, SandboxError
@@ -51,6 +52,7 @@ def _cmd_goldens(args: argparse.Namespace) -> int:
         model=args.model,
         balance=args.balance,
         on_batch=on_batch,
+        scope=args.scope,
     )
     if not goldens:
         print("no goldens generated — is the repo empty, or did every item fail validation?")
@@ -147,6 +149,31 @@ def _cmd_onboard(args: argparse.Namespace) -> int:
     return 0
 
 
+def _parse_sources(raw: list[str] | None) -> list[Source] | None:
+    """Parse repeatable `--sources` values: 'path' or 'path:kind' (kind defaults
+    to 'docs')."""
+    if not raw:
+        return None
+    sources = []
+    for item in raw:
+        path, _, kind = item.rpartition(":")
+        if not path:
+            path, kind = item, "docs"
+        sources.append(Source(path=path, kind=kind or "docs"))
+    return sources
+
+
+def _cmd_handbook(args: argparse.Namespace) -> int:
+    from .handbook import DRAFT_NAME, generate_handbook
+
+    sources = _parse_sources(args.sources)
+    print(f"generating handbook for {args.root} ...")
+    generate_handbook(args.root, sources=sources, model=args.model)
+    draft = Path(args.root).expanduser().resolve() / DRAFT_NAME
+    print(f"handbook -> {draft}")
+    return 0
+
+
 def _not_yet(args: argparse.Namespace) -> int:
     print(f"`htc {args._cmd}` is not implemented yet (see docs/spec.md phases).")
     return 1
@@ -174,6 +201,12 @@ def main(argv: list[str] | None = None) -> int:
         "--balance",
         action="store_true",
         help="steer generation toward under-covered categories",
+    )
+    p_gold.add_argument(
+        "--scope",
+        default="code",
+        choices=("code", "business", "auto"),
+        help="generation prompt: code knowledge, business/process knowledge, or auto-detect",
     )
     p_gold.set_defaults(func=_cmd_goldens)
 
@@ -218,6 +251,18 @@ def main(argv: list[str] | None = None) -> int:
     p_onb.add_argument("--results", default=None, help="results path (default .htc/results.json)")
     p_onb.add_argument("--model", default=None, help="writer model override")
     p_onb.set_defaults(func=_cmd_onboard)
+
+    p_hand = sub.add_parser("handbook", help="generate the structured onboarding handbook")
+    p_hand.add_argument("--root", required=True, help="path to the company repo")
+    p_hand.add_argument("--model", default=None, help="generation model override")
+    p_hand.add_argument(
+        "--sources",
+        action="append",
+        default=None,
+        help="extra source to ingest, 'path' or 'path:kind' (repeatable; "
+        "defaults to the repo via the filesystem adapter)",
+    )
+    p_hand.set_defaults(func=_cmd_handbook)
 
     for name in ("ingest", "train", "loop"):
         p = sub.add_parser(name, help=f"{name} (not yet implemented)")

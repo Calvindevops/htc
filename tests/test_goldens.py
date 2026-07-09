@@ -6,7 +6,10 @@ import json
 
 import pytest
 
+from htc.adapters.base import Source
 from htc.goldens.generator import (
+    BUSINESS_GENERATION_SYSTEM,
+    GENERATION_SYSTEM,
     Golden,
     _is_test_file,
     _validate,
@@ -199,6 +202,73 @@ class TestGenerateGoldensTopUp:
         # `batches = (count + 4) // 5` alone would cap at 2 iterations for count=10 —
         # confirm the top-up loop kept attempting past that fixed count.
         assert calls["n"] > 2
+
+
+class TestGenerateGoldensScope:
+    def test_code_scope_default_uses_code_prompt(self, repo, monkeypatch):
+        systems: list[str] = []
+
+        def fake_complete(system, messages, model=None):
+            systems.append(system)
+            item = {
+                "question": "q",
+                "answer": "a",
+                "artifact": "app/main.py",
+                "category": "config",
+                "difficulty": 1,
+            }
+            return LLMResponse(text=json.dumps([item]))
+
+        monkeypatch.setattr("htc.goldens.generator.complete", fake_complete)
+        goldens = generate_goldens(repo, count=1, seed=1)
+        assert goldens
+        assert systems[0] == GENERATION_SYSTEM
+
+    def test_business_scope_uses_business_prompt_and_docs_artifact(self, repo, monkeypatch):
+        docs = repo / "docs"
+        docs.mkdir()
+        (docs / "policy.md").write_text("We always ship changelogs with every release.")
+
+        systems: list[str] = []
+
+        def fake_complete(system, messages, model=None):
+            systems.append(system)
+            item = {
+                "question": "Why do we ship changelogs with releases?",
+                "answer": "House policy for transparency.",
+                "artifact": "docs/policy.md",
+                "category": "ops",
+                "difficulty": 1,
+            }
+            return LLMResponse(text=json.dumps([item]))
+
+        monkeypatch.setattr("htc.goldens.generator.complete", fake_complete)
+        goldens = generate_goldens(
+            repo,
+            count=1,
+            seed=1,
+            scope="business",
+            sources=[Source(path=str(docs), kind="docs")],
+        )
+        assert goldens
+        assert goldens[0].artifact == "docs/policy.md"
+        assert systems and all(s == BUSINESS_GENERATION_SYSTEM for s in systems)
+
+    def test_business_scope_never_samples_repo_files(self, repo, monkeypatch):
+        """With no ingested sources, business scope has nothing to sample and
+        stops immediately rather than falling back to repo files."""
+        calls = {"n": 0}
+        monkeypatch.setattr(
+            "htc.goldens.generator.complete",
+            lambda *a, **k: (calls.__setitem__("n", calls["n"] + 1), LLMResponse(text="[]"))[1],
+        )
+        goldens = generate_goldens(repo, count=1, seed=1, scope="business")
+        assert goldens == []
+        assert calls["n"] == 0
+
+    def test_unknown_scope_raises(self, repo):
+        with pytest.raises(ValueError):
+            generate_goldens(repo, count=1, scope="nonsense")
 
 
 class TestSecretFileExclusion:

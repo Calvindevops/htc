@@ -103,6 +103,34 @@ difficulty: 1 = findable in one file, 2 = needs connecting two facts, \
 Reply with ONLY a JSON array of objects: \
 {"question": str, "answer": str, "artifact": str, "category": str, "difficulty": int}"""
 
+BUSINESS_GENERATION_SYSTEM = """You write evaluation questions that test whether an AI \
+agent genuinely knows this company's business, not its code. You are given real \
+excerpts from ingested documents, transcripts, or tickets.
+
+Every question MUST probe exactly ONE of:
+- a DECISION — why the business does it this way and not some obvious alternative
+- a PROCESS / OPERATIONS fact — how a workflow, policy, or procedure actually runs
+- HOUSE STYLE — a convention, tone, or standard the company holds itself to
+- a CUSTOMER / BRAND fact — a commitment, promise, or positioning the company has made
+
+BANNED — reject these even if true:
+- pure lookup/naming questions ("what is X called", "what is the value of Y")
+- anything answerable by reading a single literal without understanding why it matters
+- generic business advice that isn't grounded in the specific excerpt shown
+
+Grounding rule: `artifact` MUST be exactly the source path shown in the excerpt's \
+header — never invent a path.
+
+The answer must be short, factual, and verifiable against the excerpts shown.
+Categories: architecture (how the business/process is structured), config (policies/ \
+settings/terms), behavior (what happens in a given business scenario), ops (day-to-day \
+process/operations).
+difficulty: 1 = findable in one excerpt, 2 = needs connecting two facts, \
+3 = needs real understanding of the business reasoning.
+
+Reply with ONLY a JSON array of objects: \
+{"question": str, "answer": str, "artifact": str, "category": str, "difficulty": int}"""
+
 
 @dataclass(frozen=True)
 class Golden:
@@ -263,6 +291,7 @@ def generate_goldens(
     balance: bool = False,
     on_batch: Callable[[int, int], None] | None = None,
     sources: list[Source] | None = None,
+    scope: str = "code",
 ) -> list[Golden]:
     """Generate ~`count` validated goldens for the repo at `root`.
 
@@ -274,7 +303,15 @@ def generate_goldens(
     per `Source.kind`) and sampled alongside repo files each batch; goldens can
     then be grounded in an ingested doc path, not only a filesystem file.
     `sources=None` (the default) is byte-for-byte today's repo-only behavior.
+
+    `scope` picks the generation prompt: "code" (default, unchanged) probes
+    repo files + any ingested chunks with the code-knowledge prompt; "business"
+    probes ONLY ingested chunks (docs/transcripts/tickets — no repo files) with
+    a prompt aimed at company/process/decision knowledge; "auto" uses the code
+    prompt for batches that have repo files and the business prompt otherwise.
     """
+    if scope not in ("code", "business", "auto"):
+        raise ValueError(f"unknown scope '{scope}' (code | business | auto)")
     root_path = Path(root).expanduser().resolve()
     rng = random.Random(seed)
     corpus = ingest_sources(sources, root_path) if sources else None
@@ -288,27 +325,31 @@ def generate_goldens(
     attempts = 0
     while len(goldens) < count and attempts < max(batches, count):
         attempts += 1
-        files = _sample_files(root_path, FILES_PER_BATCH, rng)
-        chunks = _sample_corpus_chunks(corpus, FILES_PER_BATCH, rng)
+        files = _sample_files(root_path, FILES_PER_BATCH, rng) if scope != "business" else []
+        chunks = _sample_corpus_chunks(corpus, FILES_PER_BATCH, rng) if scope != "code" else []
         if not files and not chunks:
             break
+        batch_scope = scope if scope != "auto" else ("code" if files else "business")
         sections = []
         for f in files:
             rel = f.relative_to(root_path).as_posix()
             sections.append(f"=== FILE: {rel} ===\n{_read_clipped(f)}")
         for chunk in chunks:
             sections.append(f"=== FILE: {chunk.source_path} ===\n{chunk.text}")
-        prompt = (
-            "Repo files below. Generate 5-7 golden questions grounded in them.\n\n"
-            + "\n\n".join(sections)
-        )
+        if batch_scope == "business":
+            intro = "Source documents below. Generate 5-7 golden questions grounded in them.\n\n"
+            system_prompt = BUSINESS_GENERATION_SYSTEM
+        else:
+            intro = "Repo files below. Generate 5-7 golden questions grounded in them.\n\n"
+            system_prompt = GENERATION_SYSTEM
+        prompt = intro + "\n\n".join(sections)
         if balance:
             hint = _balance_hint(category_counts, count)
             if hint:
                 prompt += "\n\n" + hint
         try:
             response = complete(
-                GENERATION_SYSTEM,
+                system_prompt,
                 [{"role": "user", "content": prompt}],
                 model=model,
             )
