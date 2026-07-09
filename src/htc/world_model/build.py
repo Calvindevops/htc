@@ -6,8 +6,34 @@ import os
 from pathlib import Path
 
 from ..adapters.base import Source
-from .ingest import ingest_sources
+from .ingest import Corpus, ingest_sources
+from .ingest.model import SourceChunk
 from .memory import MemoryStore, get_memory_store
+
+
+def _prepare_chunks(
+    corpus: Corpus, contextual: bool = False, model: str | None = None
+) -> list[SourceChunk]:
+    """Return `corpus`'s chunks, optionally contextualized (see
+    `contextualize_chunks`) — shared by `build_memory` and
+    `RetrievalPipeline.build_pipeline` so both agree on the exact same
+    chunk-preparation logic.
+
+    When `contextual` (or `HTC_CONTEXTUAL_RETRIEVAL=1`), each chunk is enriched
+    with an Anthropic-style context blurb before embedding — one LLM call per
+    chunk, so it's opt-in. Default is byte-for-byte the prior behavior.
+    """
+    chunks = corpus.all_chunks()
+    if contextual or os.environ.get("HTC_CONTEXTUAL_RETRIEVAL") == "1":
+        from .ingest.contextual import contextualize_chunks
+
+        # Reconstruct each source's full text from its (contiguous) chunks so the
+        # context prompt sees the whole document.
+        full_texts = {
+            path: "".join(c.text for c in cs) for path, cs in corpus.chunks_by_path.items()
+        }
+        chunks = contextualize_chunks(chunks, full_texts, model=model)
+    return chunks
 
 
 def build_memory(
@@ -25,16 +51,7 @@ def build_memory(
     chunk, so it's opt-in. Default is byte-for-byte the prior behavior.
     """
     corpus = ingest_sources(sources, root=Path(root))
-    chunks = corpus.all_chunks()
-    if contextual or os.environ.get("HTC_CONTEXTUAL_RETRIEVAL") == "1":
-        from .ingest.contextual import contextualize_chunks
-
-        # Reconstruct each source's full text from its (contiguous) chunks so the
-        # context prompt sees the whole document.
-        full_texts = {
-            path: "".join(c.text for c in cs) for path, cs in corpus.chunks_by_path.items()
-        }
-        chunks = contextualize_chunks(chunks, full_texts, model=model)
+    chunks = _prepare_chunks(corpus, contextual, model)
     store = get_memory_store(root, backend=backend)
     store.add_chunks(chunks)
     return store
