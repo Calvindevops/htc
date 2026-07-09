@@ -44,9 +44,10 @@ htc studio   --root . --kind podcast     # a 2-host audio-overview script
 htc history  --root .                    # your Agent-Ready scores over time
 ```
 
-Everything renders from the same cited memory layer — a local BM25 store by
-default (no external service), with an optional [gBrain](https://github.com/garrytan/gbrain)
-backend for richer retrieval.
+Everything renders from the same cited memory layer — a local hybrid
+BM25+semantic store by default (no external service), pluggable to
+[gBrain](https://github.com/garrytan/gbrain), [Supermemory](https://supermemory.ai),
+or a custom backend. See `docs/MEMORY.md`.
 
 ## Commands
 
