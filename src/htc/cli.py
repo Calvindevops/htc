@@ -285,7 +285,8 @@ def _cmd_studio(args: argparse.Namespace) -> int:
         else:
             print("script only (set HTC_TTS_* to render audio)")
     else:
-        generate_diagram(args.root, pipeline, model=args.model, kind=args.kind)
+        diagram_kind = "architecture" if args.kind == "diagram" else args.kind
+        generate_diagram(args.root, pipeline, model=args.model, kind=diagram_kind)
         out = root_path / ".htc" / "studio" / "architecture.mmd.md"
         print(f"{args.kind} diagram -> {out}")
 

@@ -15,7 +15,7 @@ import os
 from .base import NoOpReranker, Reranker, RerankerUnavailable
 from .cloud import CohereReranker, VoyageReranker, ZeroEntropyReranker
 from .local import LocalCrossEncoderReranker
-from .search import RerankingMemoryStore, search_with_rerank
+from .search import search_with_rerank
 
 __all__ = [
     "CohereReranker",
@@ -23,7 +23,6 @@ __all__ = [
     "NoOpReranker",
     "Reranker",
     "RerankerUnavailable",
-    "RerankingMemoryStore",
     "VoyageReranker",
     "ZeroEntropyReranker",
     "get_reranker",

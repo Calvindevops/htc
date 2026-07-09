@@ -3,9 +3,7 @@ existing hybrid search, then rerank down to `top_k`. Non-breaking: when
 `reranker` is `None` (or the default `NoOpReranker`), behavior is IDENTICAL
 to calling `store.search` directly — no pool expansion, no extra work.
 
-`RerankingMemoryStore` wraps any `MemoryStore` so callers that already
-accept an optional `memory: MemoryStore` (handbook/studio/wiki generators)
-can opt into reranking with no change to their retrieval code.
+Used by `RetrievalPipeline` to apply reranking after fusion.
 """
 
 from __future__ import annotations
@@ -51,38 +49,3 @@ def search_with_rerank(
     pool = _pool_size(k, rerank_pool)
     candidates = _store_search(store, query, pool, graph)
     return reranker.rerank(query, candidates, top_k=k)
-
-
-class RerankingMemoryStore:
-    """Wraps any `MemoryStore`, overriding `search` to retrieve a larger pool
-    and rerank it down to `k` via `search_with_rerank` — lets callers that
-    already accept a `memory: MemoryStore` opt into reranking with no change
-    to their retrieval code. Delegates every other method untouched."""
-
-    def __init__(
-        self, store: MemoryStore, reranker: Reranker, rerank_pool: int | None = None
-    ) -> None:
-        self._store = store
-        self._reranker = reranker
-        self._rerank_pool = rerank_pool
-
-    def add_chunks(self, chunks) -> None:
-        self._store.add_chunks(chunks)
-
-    def search(
-        self, query: str, k: int = 5, graph: KnowledgeGraph | None = None
-    ) -> list[SearchResult]:
-        return search_with_rerank(
-            self._store,
-            query,
-            k=k,
-            reranker=self._reranker,
-            rerank_pool=self._rerank_pool,
-            graph=graph,
-        )
-
-    def has_source(self, path: str) -> bool:
-        return self._store.has_source(path)
-
-    def count(self) -> int:
-        return self._store.count()
