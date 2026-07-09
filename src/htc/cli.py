@@ -3,6 +3,9 @@
 v0.2 ships the eval wedge: `goldens` (generate the repo knowledge exam),
 `eval` (score an agent, print the Agent-Ready scorecard), and `onboard`
 (draft the context pack from the gaps). `twin` boots the read-only twin.
+`study` runs the correlation-study harness (agent-ladder x task-bank, blind
+grading) that validates whether the Agent-Ready score predicts real task
+performance; grading itself is human-in-the-loop.
 `train` and `loop` (the RL chamber) land per docs/spec.md phases.
 """
 
@@ -249,6 +252,75 @@ def _cmd_history(args: argparse.Namespace) -> int:
     return 0
 
 
+def _study_path(root: str, name: str) -> Path:
+    return Path(root).expanduser().resolve() / HTC_DIR / "study" / name
+
+
+_BANK_TEMPLATE = """[
+  {
+    "id": "task-001",
+    "prompt": "Describe the prompt exactly as a real teammate would give it.",
+    "category": "example",
+    "provenance": "the real event this task is drawn from, e.g. a JIRA ticket or PR"
+  }
+]
+"""
+
+
+def _cmd_study_init(args: argparse.Namespace) -> int:
+    out = Path(args.output) if args.output else _study_path(args.root, "bank.json")
+    out.parent.mkdir(parents=True, exist_ok=True)
+    if out.is_file() and not args.force:
+        print(f"{out} already exists — use --force to overwrite.")
+        return 1
+    out.write_text(_BANK_TEMPLATE)
+    print(f"task-bank template -> {out}")
+    print("edit it with your real tasks (>= 8 recommended), then:")
+    print(f"  htc study run --root {args.root} --bank {out} --agents <agents.json>")
+    return 0
+
+
+def _cmd_study_run(args: argparse.Namespace) -> int:
+    import json
+
+    from .study import AgentSpec, load_bank, make_grading_sheet, run_attempts, save_grading_sheet
+
+    bank = load_bank(args.bank)
+    agents_data = json.loads(Path(args.agents).expanduser().read_text())
+    agents = [AgentSpec(**item) for item in agents_data]
+    print(f"running {len(bank)} task(s) against {len(agents)} agent(s) ...")
+    attempts = run_attempts(bank, agents, args.root)
+    sheet = make_grading_sheet(attempts, bank, seed=args.seed)
+    out = Path(args.output) if args.output else _study_path(args.root, "sheet.json")
+    save_grading_sheet(sheet, out)
+    print(f"{len(attempts)} attempt(s) -> {out}")
+    print("next: have a human grade each blind_id 0-4 (see docs), then:")
+    print(
+        f"  htc study analyze --sheet {out} --grades <grader-scores.json> --scores <agent-scores.json>"
+    )
+    return 0
+
+
+def _cmd_study_analyze(args: argparse.Namespace) -> int:
+    import json
+
+    from .study import ingest_grades, load_grading_sheet, study_verdict
+
+    sheet = load_grading_sheet(args.sheet)
+    grades = []
+    for grades_path in args.grades:
+        data = json.loads(Path(grades_path).expanduser().read_text())
+        grades.extend(ingest_grades(sheet, data["scores"], data["grader_id"]))
+    score_by_agent = json.loads(Path(args.scores).expanduser().read_text())
+    verdict = study_verdict(score_by_agent, grades, n=args.n, seed=args.seed)
+    print(json.dumps(verdict, indent=2))
+    if verdict["passed"]:
+        print(f"\nPASSED: rho={verdict['rho']} CI=({verdict['ci_lo']}, {verdict['ci_hi']})")
+    else:
+        print(f"\nNOT PASSED: rho={verdict['rho']} CI=({verdict['ci_lo']}, {verdict['ci_hi']})")
+    return 0
+
+
 def _not_yet(args: argparse.Namespace) -> int:
     print(f"`htc {args._cmd}` is not implemented yet (see docs/spec.md phases).")
     return 1
@@ -342,6 +414,61 @@ def main(argv: list[str] | None = None) -> int:
     p_hist = sub.add_parser("history", help="show run history and score trend")
     p_hist.add_argument("--root", required=True, help="path to the company repo")
     p_hist.set_defaults(func=_cmd_history)
+
+    p_study = sub.add_parser(
+        "study",
+        help="correlation study: validate Agent-Ready score against real task performance",
+    )
+    study_sub = p_study.add_subparsers(dest="_study_cmd", required=True)
+
+    p_study_init = study_sub.add_parser("init", help="scaffold a task-bank template")
+    p_study_init.add_argument("--root", required=True, help="path to the company repo")
+    p_study_init.add_argument(
+        "-o", "--output", default=None, help="output path (default .htc/study/bank.json)"
+    )
+    p_study_init.add_argument(
+        "--force", action="store_true", help="overwrite an existing task bank"
+    )
+    p_study_init.set_defaults(func=_cmd_study_init)
+
+    p_study_run = study_sub.add_parser(
+        "run", help="run the agent ladder against the task bank, emit a blind grading sheet"
+    )
+    p_study_run.add_argument("--root", required=True, help="path to the company repo")
+    p_study_run.add_argument("--bank", required=True, help="task-bank JSON (see `study init`)")
+    p_study_run.add_argument(
+        "--agents",
+        required=True,
+        help="JSON file: list of {id, label, agent_cmd} — the agent ladder to run "
+        "(agent_cmd null/omitted for human rungs, which are skipped here)",
+    )
+    p_study_run.add_argument(
+        "--seed", type=int, default=0, help="deterministic shuffle seed for the grading sheet"
+    )
+    p_study_run.add_argument(
+        "-o", "--output", default=None, help="grading sheet path (default .htc/study/sheet.json)"
+    )
+    p_study_run.set_defaults(func=_cmd_study_run)
+
+    p_study_analyze = study_sub.add_parser(
+        "analyze", help="compute the Spearman correlation verdict from filled-in grades"
+    )
+    p_study_analyze.add_argument("--sheet", required=True, help="grading sheet from `study run`")
+    p_study_analyze.add_argument(
+        "--grades",
+        required=True,
+        action="append",
+        help="grader score file, JSON {grader_id, scores: {blind_id: score}} (repeatable, "
+        "one per human grader)",
+    )
+    p_study_analyze.add_argument(
+        "--scores",
+        required=True,
+        help="JSON {agent_id: Agent-Ready score} from `htc eval` runs on each ladder rung",
+    )
+    p_study_analyze.add_argument("--seed", type=int, default=0, help="bootstrap seed")
+    p_study_analyze.add_argument("--n", type=int, default=1000, help="bootstrap resamples")
+    p_study_analyze.set_defaults(func=_cmd_study_analyze)
 
     for name in ("ingest", "train", "loop"):
         p = sub.add_parser(name, help=f"{name} (not yet implemented)")
