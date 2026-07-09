@@ -218,13 +218,28 @@ def _parse_sources(raw: list[str] | None) -> list[Source] | None:
     return sources
 
 
+def _build_reranking_memory(root: str, sources: list[Source] | None, rerank_name: str):
+    """Build memory and wrap it with a reranker when `--rerank` isn't "none";
+    otherwise return `None` so the caller builds memory itself, unchanged
+    from today's behavior. See HTC_RERANKER / `htc.world_model.rerank`."""
+    if rerank_name == "none":
+        return None
+    from .world_model.build import build_memory
+    from .world_model.rerank import RerankingMemoryStore, get_reranker
+
+    root_path = Path(root).expanduser().resolve()
+    store = build_memory(sources or FilesystemAdapter(str(root_path)).sources(), root_path)
+    return RerankingMemoryStore(store, get_reranker(rerank_name))
+
+
 def _cmd_handbook(args: argparse.Namespace) -> int:
     from .handbook import DRAFT_NAME, generate_handbook
 
     start = time.perf_counter()
     sources = _parse_sources(args.sources)
     print(f"generating handbook for {args.root} ...")
-    generate_handbook(args.root, sources=sources, model=args.model)
+    memory = _build_reranking_memory(args.root, sources, args.rerank)
+    generate_handbook(args.root, sources=sources, model=args.model, memory=memory)
     draft = Path(args.root).expanduser().resolve() / DRAFT_NAME
     print(f"handbook -> {draft}")
     history.record_run(args.root, "handbook", {"num_sources": len(sources) if sources else 0})
@@ -246,9 +261,12 @@ def _cmd_studio(args: argparse.Namespace) -> int:
     sources = _parse_sources(args.sources)
     root_path = Path(args.root).expanduser().resolve()
     print(f"generating {args.kind} studio artifact for {args.root} ...")
+    memory = _build_reranking_memory(args.root, sources, args.rerank)
 
     if args.kind == "podcast":
-        script = generate_podcast_script(args.root, sources=sources, model=args.model)
+        script = generate_podcast_script(
+            args.root, sources=sources, model=args.model, memory=memory
+        )
         out = root_path / ".htc" / "studio" / "overview-script.md"
         print(f"podcast script -> {out}")
         audio_out = root_path / ".htc" / "studio" / "overview.mp3"
@@ -258,7 +276,9 @@ def _cmd_studio(args: argparse.Namespace) -> int:
         else:
             print("script only (set HTC_TTS_* to render audio)")
     else:
-        generate_diagram(args.root, sources=sources, model=args.model, kind=args.kind)
+        generate_diagram(
+            args.root, sources=sources, model=args.model, kind=args.kind, memory=memory
+        )
         out = root_path / ".htc" / "studio" / "architecture.mmd.md"
         print(f"{args.kind} diagram -> {out}")
 
@@ -283,6 +303,10 @@ def _cmd_wiki(args: argparse.Namespace) -> int:
     topics = [t.strip() for t in args.topics.split(",") if t.strip()] if args.topics else None
     print(f"building wiki for {args.root} ...")
     store = build_memory(FilesystemAdapter(str(root_path)).sources(), root_path)
+    if args.rerank != "none":
+        from .world_model.rerank import RerankingMemoryStore, get_reranker
+
+        store = RerankingMemoryStore(store, get_reranker(args.rerank))
     pages = build_wiki(store, topics=topics, model=args.model)
     if not pages:
         print("no topics inferred and none provided — nothing to build.")
@@ -513,6 +537,13 @@ def main(argv: list[str] | None = None) -> int:
         help="extra source to ingest, 'path' or 'path:kind' (repeatable; "
         "defaults to the repo via the filesystem adapter)",
     )
+    p_hand.add_argument(
+        "--rerank",
+        default="none",
+        choices=("none", "zerank", "cohere", "voyage", "local"),
+        help="rerank retrieved chunks for precision before writing (default none; "
+        "BYO key via env — see HTC_RERANKER)",
+    )
     p_hand.set_defaults(func=_cmd_handbook)
 
     p_studio = sub.add_parser(
@@ -533,6 +564,13 @@ def main(argv: list[str] | None = None) -> int:
         help="extra source to ingest, 'path' or 'path:kind' (repeatable; "
         "defaults to the repo via the filesystem adapter)",
     )
+    p_studio.add_argument(
+        "--rerank",
+        default="none",
+        choices=("none", "zerank", "cohere", "voyage", "local"),
+        help="rerank retrieved chunks for precision before generating (default none; "
+        "BYO key via env — see HTC_RERANKER)",
+    )
     p_studio.set_defaults(func=_cmd_studio)
 
     p_wiki = sub.add_parser(
@@ -542,6 +580,13 @@ def main(argv: list[str] | None = None) -> int:
     p_wiki.add_argument("--model", default=None, help="generation model override")
     p_wiki.add_argument(
         "--topics", default=None, help="comma-separated topics (default: inferred from memory)"
+    )
+    p_wiki.add_argument(
+        "--rerank",
+        default="none",
+        choices=("none", "zerank", "cohere", "voyage", "local"),
+        help="rerank retrieved chunks for precision before synthesizing (default none; "
+        "BYO key via env — see HTC_RERANKER)",
     )
     p_wiki.set_defaults(func=_cmd_wiki)
 
