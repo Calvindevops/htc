@@ -44,6 +44,21 @@ Reply with ONLY a JSON object, no prose outside it, of this exact shape:
 {"answer_md": "...", "citations": ["path/one", "path/two"], "gaps": ["..."], "confidence": "high|medium|low"}
 """
 
+ASSESS_SYSTEM = """You judge whether the retrieved context below is enough to fully \
+answer a question, or whether another, more targeted search is needed first.
+
+Rules:
+- Set "sufficient" to true if the context clearly and fully answers the question.
+- Set "sufficient" to false only if the context is missing something important that \
+a different, more targeted search query could plausibly find.
+- If insufficient, set "followup_query" to ONE focused search query (not a rephrasing \
+of the original question) that targets the specific gap. If sufficient, or you can't \
+think of a useful followup, set "followup_query" to null.
+
+Reply with ONLY a JSON object, no prose outside it, of this exact shape:
+{"sufficient": true|false, "followup_query": "..."|null}
+"""
+
 
 def _context_block(results: list[SearchResult], graph_entities: list) -> str:
     lines = [f"=== SOURCE: {r.chunk.source_path} ===\n{r.chunk.text}" for r in results]
@@ -63,6 +78,80 @@ def _fallback(question: str, reason: str) -> Answer:
     )
 
 
+def _assess_sufficiency(
+    query: str,
+    results: list[SearchResult],
+    graph_entities: list,
+    model: str | None,
+) -> tuple[bool, str | None]:
+    """One `complete()` call: is `results` sufficient to answer `query`, or
+    should a followup search run first? A non-dict/unparseable reply is
+    treated as sufficient (stop) so a bad reply never causes an infinite
+    loop."""
+    prompt = f"Question: {query}\n\n{_context_block(results, graph_entities)}"
+    response = complete(ASSESS_SYSTEM, [{"role": "user", "content": prompt}], model=model)
+    try:
+        data = extract_json(response.text)
+    except LLMError:
+        return True, None
+    if not isinstance(data, dict):
+        return True, None
+    sufficient = bool(data.get("sufficient", True))
+    followup_query = data.get("followup_query")
+    if not isinstance(followup_query, str) or not followup_query.strip():
+        followup_query = None
+    return sufficient, followup_query
+
+
+def _merge_chunks(pool: list[SearchResult], new_results: list[SearchResult]) -> list[SearchResult]:
+    """Append `new_results` to `pool`, deduped by chunk id (first occurrence
+    wins), preserving `pool`'s existing order."""
+    seen = {r.chunk.id for r in pool}
+    merged = list(pool)
+    for r in new_results:
+        if r.chunk.id not in seen:
+            merged.append(r)
+            seen.add(r.chunk.id)
+    return merged
+
+
+def _iterate_retrieval(
+    query: str,
+    results: list[SearchResult],
+    memory: MemoryStore,
+    *,
+    graph: KnowledgeGraph | None,
+    reranker: Reranker | None,
+    model: str | None,
+    k: int,
+    query_transform: str | None,
+    max_rounds: int,
+) -> list[SearchResult]:
+    """Agentic retrieval loop: assess whether `results` sufficiently answers
+    `query`; if not, retrieve for the assessor's followup query and merge the
+    new chunks into the pool (deduped by chunk id). Stops when the assessor
+    says sufficient, returns no followup, or `max_rounds` retrieval rounds
+    (the initial one plus followups) have been used."""
+    graph_entities = graph.subgraph_for_query(query, k=k) if graph is not None else []
+    rounds_used = 1
+    while rounds_used < max_rounds:
+        sufficient, followup_query = _assess_sufficiency(query, results, graph_entities, model)
+        if sufficient or not followup_query:
+            break
+        followup_results = retrieve_with_transform(
+            memory,
+            followup_query,
+            k=k,
+            strategy=query_transform,
+            model=model,
+            graph=graph,
+            reranker=reranker,
+        )
+        results = _merge_chunks(results, followup_results)
+        rounds_used += 1
+    return results
+
+
 def answer_question(
     query: str,
     memory: MemoryStore,
@@ -72,6 +161,8 @@ def answer_question(
     model: str | None = None,
     k: int = SEARCH_K,
     query_transform: str | None = None,
+    iterative: bool = False,
+    max_rounds: int = 3,
 ) -> Answer:
     """Retrieve across `memory` (hybrid + optional rerank + optional graph +
     optional query transformation), then ONE LLM call to synthesize a
@@ -82,10 +173,31 @@ def answer_question(
     `query_transform` (default: "none", see `htc.world_model.query`) opts
     into an LLM-driven retrieval-query transform ("expand"/"hyde"/
     "decompose"/"multi") before the search above; "none" makes no extra LLM
-    call and behaves exactly as before."""
+    call and behaves exactly as before.
+
+    `iterative` (default: False, zero extra LLM calls, current behavior
+    unchanged) opts into agentic/iterative retrieval: after the initial
+    retrieval, the model assesses whether the accumulated context is
+    sufficient; if not, it proposes a followup query, which is retrieved and
+    merged into the pool (deduped by chunk id), up to `max_rounds` retrieval
+    rounds total, before the final synthesis call below runs."""
     results = retrieve_with_transform(
         memory, query, k=k, strategy=query_transform, model=model, graph=graph, reranker=reranker
     )
+
+    if iterative and results:
+        results = _iterate_retrieval(
+            query,
+            results,
+            memory,
+            graph=graph,
+            reranker=reranker,
+            model=model,
+            k=k,
+            query_transform=query_transform,
+            max_rounds=max_rounds,
+        )
+
     if not results:
         return _fallback(query, "no relevant chunks were found in memory for this question")
 

@@ -385,7 +385,13 @@ def _cmd_ask(args: argparse.Namespace) -> int:
 
     print(f"synthesizing an answer for {args.root} ...")
     answer = answer_question(
-        args.question, memory, graph=graph, model=args.model, query_transform=args.query_transform
+        args.question,
+        memory,
+        graph=graph,
+        model=args.model,
+        query_transform=args.query_transform,
+        iterative=args.iterative,
+        max_rounds=args.max_rounds,
     )
 
     print(f"\n{answer.answer_md}\n")
@@ -782,6 +788,19 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="contextual retrieval: an LLM situates each chunk in its document before "
         "embedding (one LLM call per chunk at ingest; see HTC_CONTEXTUAL_RETRIEVAL)",
+    )
+    p_ask.add_argument(
+        "--iterative",
+        action="store_true",
+        help="agentic/iterative retrieval: after retrieving, the model assesses whether "
+        "the context is sufficient and can propose a followup search, up to "
+        "--max-rounds (default off, no extra LLM calls when unset)",
+    )
+    p_ask.add_argument(
+        "--max-rounds",
+        type=int,
+        default=3,
+        help="max retrieval rounds when --iterative is set (default 3)",
     )
     p_ask.set_defaults(func=_cmd_ask)
 
