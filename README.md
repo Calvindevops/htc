@@ -36,7 +36,8 @@ company knowledge from it:
 
 ```bash
 pip install -e '.[ingest]'               # PDF/DOCX/PPTX/XLSX extractors (core stays light)
-pip install -e '.[embed]'                # recommended: local semantic search, zero config (see docs/MEMORY.md)
+ollama pull nomic-embed-text             # recommended: semantic search via local Ollama (see docs/MEMORY.md)
+pip install -e '.[embed]'                # optional offline fallback if you skip Ollama/cloud
 
 htc handbook --root .                    # generate a structured Employee Handbook (draft)
 htc goldens  --root . --scope business   # ask company questions, not just code

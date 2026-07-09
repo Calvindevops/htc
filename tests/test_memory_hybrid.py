@@ -36,6 +36,23 @@ def _fake_post_factory(vectors_by_text: dict[str, list[float]]):
     return _fake_post
 
 
+def _install_fake_fastembed(monkeypatch, vectors_by_text: dict[str, list[float]]) -> None:
+    """Fake the `fastembed` package via `sys.modules` — it isn't an installed
+    dependency here, so this avoids any real model download."""
+
+    class _FakeTextEmbedding:
+        def __init__(self, model_name: str) -> None:
+            self.model_name = model_name
+
+        def embed(self, texts):
+            return [vectors_by_text[text] for text in texts]
+
+    fake_module = types.ModuleType("fastembed")
+    fake_module.TextEmbedding = _FakeTextEmbedding
+    monkeypatch.setitem(sys.modules, "fastembed", fake_module)
+    local_module._fastembed_model_cache.clear()
+
+
 class TestHybridRetrieval:
     def test_hybrid_fuses_bm25_and_semantic_and_changes_ranking(self, tmp_path, monkeypatch):
         monkeypatch.setenv("HTC_EMBED_BASE_URL", "https://embed.example.com")
@@ -130,24 +147,11 @@ class TestFastEmbedDefaultEmbedder:
     no `HTC_EMBED_*` config required. `fastembed` isn't an installed
     dependency here, so it's faked via `sys.modules` (no model download)."""
 
-    def _install_fake_fastembed(self, monkeypatch, vectors_by_text: dict[str, list[float]]):
-        class _FakeTextEmbedding:
-            def __init__(self, model_name: str) -> None:
-                self.model_name = model_name
-
-            def embed(self, texts):
-                return [vectors_by_text[text] for text in texts]
-
-        fake_module = types.ModuleType("fastembed")
-        fake_module.TextEmbedding = _FakeTextEmbedding
-        monkeypatch.setitem(sys.modules, "fastembed", fake_module)
-        local_module._fastembed_model_cache.clear()
-
     def test_fastembed_used_when_no_remote_endpoint_configured(self, tmp_path, monkeypatch):
         monkeypatch.delenv("HTC_EMBED_BASE_URL", raising=False)
         monkeypatch.delenv("HTC_EMBED_API_KEY", raising=False)
         monkeypatch.delenv("HTC_EMBED_MODEL", raising=False)
-        self._install_fake_fastembed(monkeypatch, {"hello world": [0.1, 0.2, 0.3]})
+        _install_fake_fastembed(monkeypatch, {"hello world": [0.1, 0.2, 0.3]})
 
         store = local_module.LocalMemoryStore(tmp_path)
         store.add_chunks([_chunk("a", "x.md", "hello world")])
@@ -159,7 +163,7 @@ class TestFastEmbedDefaultEmbedder:
         monkeypatch.setenv("HTC_EMBED_BASE_URL", "https://embed.example.com")
         monkeypatch.setenv("HTC_EMBED_API_KEY", "test-key")
         monkeypatch.setenv("HTC_EMBED_MODEL", "test-embed-model")
-        self._install_fake_fastembed(monkeypatch, {"hello world": [9.9, 9.9, 9.9]})
+        _install_fake_fastembed(monkeypatch, {"hello world": [9.9, 9.9, 9.9]})
         monkeypatch.setattr(
             local_module, "_post", _fake_post_factory({"hello world": [0.5, 0.5, 0.5]})
         )
@@ -179,6 +183,145 @@ class TestFastEmbedDefaultEmbedder:
         store.add_chunks([_chunk("a", "x.md", "hello world")])
 
         assert not (tmp_path / ".htc" / "memory" / "embeddings.jsonl").exists()
+
+
+class TestEmbedderPrecedence:
+    """Full precedence order: cloud endpoint > Ollama (recommended default,
+    matching gBrain) > bundled fastembed fallback > BM25 only. `tests/
+    conftest.py` forces `_ollama_reachable` False and isolates the global
+    wizard config file by default; individual tests override as needed."""
+
+    def test_ollama_used_when_reachable_and_no_cloud_endpoint(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("HTC_EMBED_BASE_URL", raising=False)
+        monkeypatch.delenv("HTC_EMBED_API_KEY", raising=False)
+        monkeypatch.delenv("HTC_EMBED_MODEL", raising=False)
+        monkeypatch.setattr(local_module, "_ollama_reachable", lambda: True)
+
+        def _fake_ollama_post(url, headers, body):
+            assert url.endswith("/api/embeddings")
+            assert body["model"] == local_module._OLLAMA_DEFAULT_MODEL
+            return {"embedding": [0.7, 0.8, 0.9]}
+
+        monkeypatch.setattr(local_module, "_post", _fake_ollama_post)
+
+        store = local_module.LocalMemoryStore(tmp_path)
+        store.add_chunks([_chunk("a", "x.md", "hello world")])
+
+        assert store._embeddings["a"] == [0.7, 0.8, 0.9]
+
+    def test_cloud_endpoint_takes_precedence_over_reachable_ollama(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HTC_EMBED_BASE_URL", "https://embed.example.com")
+        monkeypatch.setenv("HTC_EMBED_API_KEY", "test-key")
+        monkeypatch.setenv("HTC_EMBED_MODEL", "test-embed-model")
+        monkeypatch.setattr(local_module, "_ollama_reachable", lambda: True)
+        monkeypatch.setattr(
+            local_module, "_post", _fake_post_factory({"hello world": [0.5, 0.5, 0.5]})
+        )
+
+        store = local_module.LocalMemoryStore(tmp_path)
+        store.add_chunks([_chunk("a", "x.md", "hello world")])
+
+        assert store._embeddings["a"] == [0.5, 0.5, 0.5]
+
+    def test_fastembed_used_when_ollama_unreachable(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("HTC_EMBED_BASE_URL", raising=False)
+        monkeypatch.delenv("HTC_EMBED_API_KEY", raising=False)
+        monkeypatch.delenv("HTC_EMBED_MODEL", raising=False)
+        # _ollama_reachable already forced False by the autouse conftest fixture.
+        _install_fake_fastembed(monkeypatch, {"hello world": [0.1, 0.2, 0.3]})
+
+        store = local_module.LocalMemoryStore(tmp_path)
+        store.add_chunks([_chunk("a", "x.md", "hello world")])
+
+        assert store._embeddings["a"] == [0.1, 0.2, 0.3]
+
+    def test_saved_bm25_preference_overrides_available_fastembed(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("HTC_EMBED_BASE_URL", raising=False)
+        monkeypatch.delenv("HTC_EMBED_API_KEY", raising=False)
+        monkeypatch.delenv("HTC_EMBED_MODEL", raising=False)
+        _install_fake_fastembed(monkeypatch, {"hello world": [0.1, 0.2, 0.3]})
+        local_module._save_global_config({"embed_backend": "bm25"})
+
+        store = local_module.LocalMemoryStore(tmp_path)
+        store.add_chunks([_chunk("a", "x.md", "hello world")])
+
+        assert not (tmp_path / ".htc" / "memory" / "embeddings.jsonl").exists()
+
+
+class TestFirstBootWizard:
+    """The Supermemory-style first-boot picker: only fires when nothing is
+    configured or reachable, saves the answer so it's asked once, and never
+    blocks non-interactive runs."""
+
+    def test_non_interactive_env_var_skips_prompt(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("HTC_EMBED_BASE_URL", raising=False)
+        monkeypatch.delenv("HTC_EMBED_API_KEY", raising=False)
+        monkeypatch.delenv("HTC_EMBED_MODEL", raising=False)
+        monkeypatch.setenv("HTC_EMBED_NONINTERACTIVE", "1")
+
+        def _boom(prompt=""):
+            raise AssertionError("input() should not be called in non-interactive mode")
+
+        monkeypatch.setattr("builtins.input", _boom)
+
+        store = local_module.LocalMemoryStore(tmp_path)
+        store.add_chunks([_chunk("a", "x.md", "hello world")])  # must not hang or raise
+
+        assert local_module._load_global_config() == {}
+
+    def test_no_tty_skips_prompt(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("HTC_EMBED_BASE_URL", raising=False)
+        monkeypatch.delenv("HTC_EMBED_API_KEY", raising=False)
+        monkeypatch.delenv("HTC_EMBED_MODEL", raising=False)
+        monkeypatch.delenv("HTC_EMBED_NONINTERACTIVE", raising=False)
+        monkeypatch.setattr(local_module.sys.stdin, "isatty", lambda: False)
+
+        def _boom(prompt=""):
+            raise AssertionError("input() should not be called when stdin is not a TTY")
+
+        monkeypatch.setattr("builtins.input", _boom)
+
+        local_module._embedder_available()
+
+        assert local_module._load_global_config() == {}
+
+    def test_interactive_prompt_saves_choice_and_only_asks_once(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("HTC_EMBED_BASE_URL", raising=False)
+        monkeypatch.delenv("HTC_EMBED_API_KEY", raising=False)
+        monkeypatch.delenv("HTC_EMBED_MODEL", raising=False)
+        monkeypatch.delenv("HTC_EMBED_NONINTERACTIVE", raising=False)
+        monkeypatch.setattr(local_module.sys.stdin, "isatty", lambda: True)
+
+        answers = iter(["c"])
+        monkeypatch.setattr("builtins.input", lambda prompt="": next(answers))
+
+        local_module._embedder_available()
+        assert local_module._load_global_config() == {"embed_backend": "fastembed"}
+
+        # Second call: preference already saved, must not prompt again.
+        monkeypatch.setattr(
+            "builtins.input",
+            lambda prompt="": (_ for _ in ()).throw(
+                AssertionError("should not prompt once a preference is saved")
+            ),
+        )
+        local_module._embedder_available()
+
+    def test_ollama_reachable_skips_wizard_entirely(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("HTC_EMBED_BASE_URL", raising=False)
+        monkeypatch.delenv("HTC_EMBED_API_KEY", raising=False)
+        monkeypatch.delenv("HTC_EMBED_MODEL", raising=False)
+        monkeypatch.delenv("HTC_EMBED_NONINTERACTIVE", raising=False)
+        monkeypatch.setattr(local_module, "_ollama_reachable", lambda: True)
+        monkeypatch.setattr(local_module.sys.stdin, "isatty", lambda: True)
+
+        def _boom(prompt=""):
+            raise AssertionError("input() should not be called — Ollama already works")
+
+        monkeypatch.setattr("builtins.input", _boom)
+
+        assert local_module._embedder_available() is True
+        assert local_module._load_global_config() == {}
 
 
 class TestSupermemoryMemoryStore:
