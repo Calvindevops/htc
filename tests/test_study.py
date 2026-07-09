@@ -58,14 +58,15 @@ class TestMakeGradingSheet:
             Attempt(task_id="t2", agent_id="base", output="a2"),
             Attempt(task_id="t3", agent_id="full", output="a3"),
         ]
-        sheet_a = make_grading_sheet(attempts, tasks, seed=7)
-        sheet_b = make_grading_sheet(attempts, tasks, seed=7)
+        sheet_a, key_a = make_grading_sheet(attempts, tasks, seed=7)
+        sheet_b, key_b = make_grading_sheet(attempts, tasks, seed=7)
         assert sheet_a == sheet_b
+        assert key_a == key_b
 
     def test_strips_agent_identity_from_blind_view(self):
         tasks = [_task(id="t1")]
         attempts = [Attempt(task_id="t1", agent_id="base", output="the answer")]
-        sheet = make_grading_sheet(attempts, tasks, seed=1)
+        sheet, key = make_grading_sheet(attempts, tasks, seed=1)
         row = sheet[0]
         # the human-facing fields carry no agent label anywhere in their values
         assert row["blind_id"] == "blind-000"
@@ -73,12 +74,17 @@ class TestMakeGradingSheet:
         assert row["output"] == "the answer"
         assert "base" not in row["blind_id"]
         assert "base" not in row["task_prompt"]
+        # the grader-facing sheet must not carry ANY identity-revealing keys
+        assert "task_id" not in row
+        assert "agent_id" not in row
+        # the private key carries the reversal mapping instead
+        assert key[0] == {"blind_id": "blind-000", "task_id": "t1", "agent_id": "base"}
 
     def test_shuffles_order_relative_to_input(self):
         tasks = [_task(id=f"t{i}") for i in range(8)]
         attempts = [Attempt(task_id=t.id, agent_id="base", output=t.id) for t in tasks]
-        sheet = make_grading_sheet(attempts, tasks, seed=3)
-        order = [row["task_id"] for row in sheet]
+        _sheet, key = make_grading_sheet(attempts, tasks, seed=3)
+        order = [row["task_id"] for row in key]
         assert order != [t.id for t in tasks]
         assert sorted(order) == sorted(t.id for t in tasks)
 
@@ -90,9 +96,9 @@ class TestIngestGrades:
             Attempt(task_id="t1", agent_id="base", output="a1"),
             Attempt(task_id="t2", agent_id="full", output="a2"),
         ]
-        sheet = make_grading_sheet(attempts, tasks, seed=5)
+        sheet, key = make_grading_sheet(attempts, tasks, seed=5)
         filled = {row["blind_id"]: 3 for row in sheet}
-        grades = ingest_grades(sheet, filled, grader_id="alice")
+        grades = ingest_grades(key, filled, grader_id="alice")
         assert len(grades) == 2
         by_task = {g.task_id: g for g in grades}
         assert by_task["t1"].agent_id == "base"
@@ -101,11 +107,11 @@ class TestIngestGrades:
         assert by_task["t2"].agent_id == "full"
 
     def test_unknown_blind_id_raises(self):
-        sheet = make_grading_sheet(
+        _sheet, key = make_grading_sheet(
             [Attempt(task_id="t1", agent_id="base", output="a1")], [_task(id="t1")], seed=0
         )
         try:
-            ingest_grades(sheet, {"blind-999": 2}, grader_id="bob")
+            ingest_grades(key, {"blind-999": 2}, grader_id="bob")
             assert False, "expected ValueError"
         except ValueError:
             pass

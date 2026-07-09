@@ -566,13 +566,16 @@ def _cmd_study_run(args: argparse.Namespace) -> int:
     agents = [AgentSpec(**item) for item in agents_data]
     print(f"running {len(bank)} task(s) against {len(agents)} agent(s) ...")
     attempts = run_attempts(bank, agents, args.root)
-    sheet = make_grading_sheet(attempts, bank, seed=args.seed)
-    out = Path(args.output) if args.output else _study_path(args.root, "sheet.json")
-    save_grading_sheet(sheet, out)
-    print(f"{len(attempts)} attempt(s) -> {out}")
+    grader_sheet, key = make_grading_sheet(attempts, bank, seed=args.seed)
+    out = Path(args.output) if args.output else _study_path(args.root, "grading-sheet.json")
+    out_key = out.parent / "grading-key.json"
+    save_grading_sheet(grader_sheet, out)
+    save_grading_sheet(key, out_key)
+    print(f"{len(attempts)} attempt(s) -> {out} (grader-facing, blind)")
+    print(f"private reversal key -> {out_key} (do NOT show to the grader)")
     print("next: have a human grade each blind_id 0-4 (see docs), then:")
     print(
-        f"  htc study analyze --sheet {out} --grades <grader-scores.json> --scores <agent-scores.json>"
+        f"  htc study analyze --key {out_key} --grades <grader-scores.json> --scores <agent-scores.json>"
     )
     return 0
 
@@ -582,11 +585,11 @@ def _cmd_study_analyze(args: argparse.Namespace) -> int:
 
     from .study import ingest_grades, load_grading_sheet, study_verdict
 
-    sheet = load_grading_sheet(args.sheet)
+    key = load_grading_sheet(args.key)
     grades = []
     for grades_path in args.grades:
         data = json.loads(Path(grades_path).expanduser().read_text())
-        grades.extend(ingest_grades(sheet, data["scores"], data["grader_id"]))
+        grades.extend(ingest_grades(key, data["scores"], data["grader_id"]))
     score_by_agent = json.loads(Path(args.scores).expanduser().read_text())
     verdict = study_verdict(score_by_agent, grades, n=args.n, seed=args.seed)
     print(json.dumps(verdict, indent=2))
@@ -879,14 +882,20 @@ def main(argv: list[str] | None = None) -> int:
         "--seed", type=int, default=0, help="deterministic shuffle seed for the grading sheet"
     )
     p_study_run.add_argument(
-        "-o", "--output", default=None, help="grading sheet path (default .htc/study/sheet.json)"
+        "-o",
+        "--output",
+        default=None,
+        help="grader-facing sheet path (default .htc/study/grading-sheet.json); "
+        "the private reversal key is written alongside it as grading-key.json",
     )
     p_study_run.set_defaults(func=_cmd_study_run)
 
     p_study_analyze = study_sub.add_parser(
         "analyze", help="compute the Spearman correlation verdict from filled-in grades"
     )
-    p_study_analyze.add_argument("--sheet", required=True, help="grading sheet from `study run`")
+    p_study_analyze.add_argument(
+        "--key", required=True, help="private grading-key.json from `study run` (blind_id reversal)"
+    )
     p_study_analyze.add_argument(
         "--grades",
         required=True,

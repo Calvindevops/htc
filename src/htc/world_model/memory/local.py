@@ -266,7 +266,13 @@ def _embed(texts: list[str]) -> list[list[float]]:
     return _fastembed_embed(texts)
 
 
-def _cosine(a: list[float], b: list[float]) -> float:
+def _cosine(a: list[float], b: list[float]) -> float | None:
+    """Cosine similarity, or `None` if `a`/`b` have mismatched dimensionality
+    (e.g. a stale embedding left over from a different embedder/model) —
+    callers must skip rather than mix dimensions, which would otherwise
+    silently produce garbage similarity scores."""
+    if len(a) != len(b):
+        return None
     dot = sum(x * y for x, y in zip(a, b))
     norm_a = math.sqrt(sum(x * x for x in a))
     norm_b = math.sqrt(sum(y * y for y in b))
@@ -399,12 +405,29 @@ class LocalMemoryStore:
 
     def _semantic_ranking(self, query: str) -> list[str]:
         """Best-first chunk ids by cosine similarity to `query`'s embedding.
-        Only chunks with a stored embedding participate."""
+        Only chunks with a stored embedding participate. Stored embeddings
+        whose dimensionality doesn't match the query's (e.g. a stale
+        `embeddings.jsonl` left over from a different embedder/model) are
+        skipped rather than mixed in, which would otherwise silently produce
+        garbage similarity scores."""
         available_ids = [chunk.id for chunk in self._all_sorted() if chunk.id in self._embeddings]
         if not available_ids:
             return []
         query_vector = _embed([query])[0]
-        scored = [(_cosine(query_vector, self._embeddings[id_]), id_) for id_ in available_ids]
+        scored = []
+        skipped_dim_mismatch = 0
+        for id_ in available_ids:
+            similarity = _cosine(query_vector, self._embeddings[id_])
+            if similarity is None:
+                skipped_dim_mismatch += 1
+                continue
+            scored.append((similarity, id_))
+        if skipped_dim_mismatch:
+            print(
+                f"  [htc] skipped {skipped_dim_mismatch} stored embedding(s) with mismatched "
+                "dimensionality (stale embeddings.jsonl?)",
+                file=sys.stderr,
+            )
         scored.sort(key=lambda pair: (-pair[0], pair[1]))
         return [id_ for _, id_ in scored]
 

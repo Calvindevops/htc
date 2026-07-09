@@ -5,9 +5,10 @@ deterministic (content-hash keyed, no wall-clock/mtime)."""
 from .dedup import dedup_chunks
 from .refresh import refresh_memory
 from .staleness import check_staleness, count_stale
-from .state import content_hash, load_manifest, manifest_path, save_manifest
+from .state import atomic_write_text, content_hash, load_manifest, manifest_path, save_manifest
 
 __all__ = [
+    "atomic_write_text",
     "check_staleness",
     "content_hash",
     "count_stale",

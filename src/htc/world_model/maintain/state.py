@@ -10,9 +10,22 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import uuid
 from pathlib import Path
 
 MANIFEST_REL_PATH = Path(".htc") / "memory" / "manifest.json"
+
+
+def atomic_write_text(path: str | Path, text: str) -> None:
+    """Write `text` to `path` atomically: write to a temp file in the same
+    directory, then `os.replace` onto the target. An interrupted or
+    concurrent write can never leave `path` partially written."""
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = target.parent / f".{target.name}.{uuid.uuid4().hex}.tmp"
+    tmp_path.write_text(text)
+    os.replace(tmp_path, target)
 
 
 def manifest_path(root: str | Path) -> Path:
@@ -37,5 +50,4 @@ def load_manifest(root: str | Path) -> dict[str, dict]:
 
 def save_manifest(root: str | Path, manifest: dict[str, dict]) -> None:
     path = manifest_path(root)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
+    atomic_write_text(path, json.dumps(manifest, indent=2, sort_keys=True) + "\n")

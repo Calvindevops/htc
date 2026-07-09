@@ -75,3 +75,23 @@ class TestRunEvalParallel:
         assert len(result.items) == 5
         assert "q3" not in {item.golden.question for item in result.items}
         assert "SKIPPED" in capsys.readouterr().err
+
+    def test_non_llm_error_is_skipped_not_fatal(self, tmp_path, monkeypatch, capsys):
+        """A malformed provider response can raise something other than
+        LLMError (e.g. AttributeError, ValueError) inside the agent/judge —
+        that item must be skipped, not kill the whole run."""
+        goldens = [_golden(question=f"q{i}") for i in range(6)]
+
+        def flaky_agent(root, question, model):
+            if question == "q3":
+                raise ValueError("malformed provider response")
+            return f"answer to {question}"
+
+        monkeypatch.setattr("htc.evaluation.runner._builtin_agent", flaky_agent)
+        monkeypatch.setattr(
+            "htc.evaluation.runner._judge", lambda golden, answer: ("correct", "matches")
+        )
+        result = run_eval(tmp_path, goldens, concurrency=4)
+        assert len(result.items) == 5
+        assert "q3" not in {item.golden.question for item in result.items}
+        assert "SKIPPED" in capsys.readouterr().err

@@ -134,6 +134,32 @@ class TestHybridRetrieval:
         reloaded = local_module.LocalMemoryStore(tmp_path)
         assert reloaded._embeddings == {"a": [0.1, 0.2, 0.3]}
 
+    def test_mismatched_embedding_dim_is_skipped_not_crashed(self, tmp_path, monkeypatch):
+        """A stored embedding with a different dimensionality than the query
+        (e.g. left over from a different embedder/model) must be skipped
+        from semantic ranking, not crash or silently corrupt the ranking."""
+        monkeypatch.setenv("HTC_EMBED_BASE_URL", "https://embed.example.com")
+        monkeypatch.setenv("HTC_EMBED_API_KEY", "test-key")
+        monkeypatch.setenv("HTC_EMBED_MODEL", "test-embed-model")
+
+        texts = {
+            "refund policy semantics": [1.0, 0.0, 0.0],  # query
+            "refund policy details": [1.0, 0.0, 0.0],  # chunk b (semantic match)
+        }
+        monkeypatch.setattr(local_module, "_post", _fake_post_factory(texts))
+
+        store = local_module.LocalMemoryStore(tmp_path)
+        store.add_chunks([_chunk("b", "b.md", "refund policy details")])
+        # simulate a stale embedding from a different model (different dim).
+        store._embeddings["a"] = [1.0, 0.0, 0.0, 0.0]
+        store._chunks_by_id["a"] = _chunk("a", "a.md", "totally unrelated content")
+
+        results = store.search("refund policy semantics", k=2)
+        result_ids = [r.chunk.id for r in results]
+
+        assert "a" not in result_ids
+        assert "b" in result_ids
+
     def test_rrf_fuse_basic(self):
         fused = local_module._rrf_fuse([["a", "b", "c"], ["b", "a"]])
         # "a": rank1 in first + rank2 in second; "b": rank2 in first + rank1 in second.

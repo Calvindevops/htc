@@ -293,7 +293,7 @@ def run_eval(
             index = futures[future]
             try:
                 item = future.result()
-            except LLMError as err:
+            except Exception as err:  # noqa: BLE001 - per-item guard, must not kill the run
                 with print_lock:
                     skipped += 1
                     print(f"  [{index}/{total}] SKIPPED (provider error: {err})", file=sys.stderr)

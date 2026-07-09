@@ -9,7 +9,7 @@ from htc.world_model.ingest.model import SourceChunk
 from htc.world_model.maintain.dedup import dedup_chunks
 from htc.world_model.maintain.refresh import refresh_memory
 from htc.world_model.maintain.staleness import check_staleness
-from htc.world_model.maintain.state import load_manifest
+from htc.world_model.maintain.state import atomic_write_text, load_manifest, save_manifest
 from htc.world_model.memory.local import LocalMemoryStore
 from htc.world_model.memory import local as local_module
 
@@ -210,3 +210,29 @@ class TestDedup:
         first = dedup_chunks(chunks)
         second = dedup_chunks(chunks)
         assert [c.id for c in first] == [c.id for c in second]
+
+
+class TestAtomicWriteText:
+    def test_writes_correct_content(self, tmp_path):
+        path = tmp_path / "sub" / "out.json"
+        atomic_write_text(path, "hello world\n")
+        assert path.read_text() == "hello world\n"
+
+    def test_leaves_no_partial_file_on_happy_path(self, tmp_path):
+        path = tmp_path / "out.json"
+        atomic_write_text(path, "content\n")
+        # only the final target should exist in the directory — no leftover
+        # temp files from the write-then-replace sequence.
+        assert [p.name for p in tmp_path.iterdir()] == ["out.json"]
+
+    def test_overwrites_existing_file_atomically(self, tmp_path):
+        path = tmp_path / "out.json"
+        atomic_write_text(path, "first\n")
+        atomic_write_text(path, "second\n")
+        assert path.read_text() == "second\n"
+        assert [p.name for p in tmp_path.iterdir()] == ["out.json"]
+
+    def test_manifest_round_trips_via_atomic_write(self, tmp_path):
+        manifest = {"a.py": {"hash": "abc123", "chunk_ids": ["a1", "a2"]}}
+        save_manifest(tmp_path, manifest)
+        assert load_manifest(tmp_path) == manifest
