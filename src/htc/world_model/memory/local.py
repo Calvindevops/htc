@@ -339,6 +339,24 @@ class LocalMemoryStore:
             self._embeddings[chunk.id] = vector
         self._persist_embeddings()
 
+    def remove_source(self, source_path: str) -> int:
+        """Remove every chunk (and stored embedding) for `source_path`.
+        Returns the count removed. Used by the maintenance/refresh layer to
+        replace a stale source's chunks without rebuilding the whole store."""
+        target = source_path.lstrip("/")
+        stale_ids = [
+            chunk_id
+            for chunk_id, chunk in self._chunks_by_id.items()
+            if chunk.source_path == target
+        ]
+        for chunk_id in stale_ids:
+            del self._chunks_by_id[chunk_id]
+            self._embeddings.pop(chunk_id, None)
+        if stale_ids:
+            self._persist()
+            self._persist_embeddings()
+        return len(stale_ids)
+
     def has_source(self, path: str) -> bool:
         target = path.lstrip("/")
         return any(chunk.source_path == target for chunk in self._chunks_by_id.values())

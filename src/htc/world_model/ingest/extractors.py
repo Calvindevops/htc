@@ -122,6 +122,41 @@ def _extract_plain(path: Path) -> str:
     return path.read_text(errors="replace")
 
 
+# Common source-code suffixes — extracted as plaintext, no parsing. This is
+# what makes `ingest_sources` cover code as well as docs, so memory and the
+# knowledge graph both ground on the actual implementation, not just docs.
+CODE_SUFFIXES = frozenset(
+    {
+        ".py",
+        ".js",
+        ".ts",
+        ".tsx",
+        ".jsx",
+        ".go",
+        ".rs",
+        ".java",
+        ".rb",
+        ".php",
+        ".c",
+        ".cpp",
+        ".h",
+        ".hpp",
+        ".cs",
+        ".swift",
+        ".kt",
+        ".scala",
+        ".sh",
+        ".css",
+        ".scss",
+        ".sql",
+        ".json",
+        ".yaml",
+        ".yml",
+        ".toml",
+        ".ini",
+    }
+)
+
 _EXTRACTORS = {
     ".txt": _extract_plain,
     ".md": _extract_plain,
@@ -133,11 +168,32 @@ _EXTRACTORS = {
     ".docx": _extract_docx,
     ".pptx": _extract_pptx,
     ".xlsx": _extract_xlsx,
+    **{suffix: _extract_plain for suffix in CODE_SUFFIXES},
 }
 
 # Extensions with a registered extractor — used by callers that want to
 # pre-filter files without invoking extraction.
 KNOWN_SUFFIXES = frozenset(_EXTRACTORS)
+
+# Mirrors `goldens.generator.SECRET_SUFFIXES`/`SECRET_NAMES`/`SECRET_STEMS`:
+# duplicated (not imported) to avoid a circular import (goldens.generator
+# already imports `world_model.ingest`). Keep these two lists in sync.
+_SECRET_SUFFIXES = {".pem", ".key", ".p12", ".pfx", ".keystore", ".jks"}
+_SECRET_NAMES = {"credentials", "secrets", ".npmrc", ".pypirc", ".netrc", ".htpasswd"}
+_SECRET_STEMS = ("id_rsa", "id_ed25519", "id_dsa", "id_ecdsa")
+
+
+def is_secret_file(path: Path) -> bool:
+    """True if `path` looks like it carries secrets (.env*, keys, credentials)
+    — such files must never enter the ingest corpus."""
+    name = path.name.lower()
+    if name.startswith(".env"):
+        return True
+    if path.suffix.lower() in _SECRET_SUFFIXES:
+        return True
+    if name in _SECRET_NAMES:
+        return True
+    return any(name.startswith(stem) for stem in _SECRET_STEMS)
 
 
 def extract_text(path: Path) -> str:

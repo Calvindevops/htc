@@ -12,9 +12,15 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from ...adapters.base import Source
+from ...adapters.base import EXCLUDED_DIRS, Source
 from .chunker import chunk_text
-from .extractors import KNOWN_SUFFIXES, MissingDependencyError, UnsupportedFormatError, extract_text
+from .extractors import (
+    KNOWN_SUFFIXES,
+    MissingDependencyError,
+    UnsupportedFormatError,
+    extract_text,
+    is_secret_file,
+)
 from .model import SourceChunk
 
 
@@ -34,8 +40,38 @@ class Corpus:
         return [chunk for chunks in self.chunks_by_path.values() for chunk in chunks]
 
 
+def _is_ingestible(path: Path) -> bool:
+    """Whether `path` has a registered extractor and isn't a secret file —
+    the shared filter between `ingest_sources` and the maintenance layer's
+    staleness check, so both agree on the exact same universe of files."""
+    return path.suffix.lower() in KNOWN_SUFFIXES and not is_secret_file(path)
+
+
+def iter_ingestible_files(sources: list[Source], root: Path) -> list[Path]:
+    """Enumerate files under `sources` that would be ingested (known
+    extension, not a secret file) — the same universe `ingest_sources`
+    chunks, but as raw paths for callers (e.g. staleness detection) that
+    don't need extraction/chunking."""
+    files: list[Path] = []
+    for source in sources:
+        location = Path(source.path)
+        if not location.is_absolute():
+            location = root / location
+        if location.is_file():
+            if _is_ingestible(location):
+                files.append(location)
+        elif location.is_dir():
+            for file_path in sorted(location.rglob("*")):
+                if not file_path.is_file() or not _is_ingestible(file_path):
+                    continue
+                if set(file_path.relative_to(location).parts) & EXCLUDED_DIRS:
+                    continue
+                files.append(file_path)
+    return files
+
+
 def _ingest_file(path: Path, root: Path) -> list[SourceChunk]:
-    if path.suffix.lower() not in KNOWN_SUFFIXES:
+    if not _is_ingestible(path):
         return []
     try:
         text = extract_text(path)
@@ -54,19 +90,8 @@ def ingest_sources(sources: list[Source], root: Path) -> Corpus:
     folder is the common case).
     """
     chunks_by_path: dict[str, list[SourceChunk]] = {}
-    for source in sources:
-        location = Path(source.path)
-        if not location.is_absolute():
-            location = root / location
-        if location.is_file():
-            chunks = _ingest_file(location, root)
-            if chunks:
-                chunks_by_path[chunks[0].source_path] = chunks
-        elif location.is_dir():
-            for file_path in sorted(location.rglob("*")):
-                if not file_path.is_file():
-                    continue
-                chunks = _ingest_file(file_path, root)
-                if chunks:
-                    chunks_by_path[chunks[0].source_path] = chunks
+    for file_path in iter_ingestible_files(sources, root):
+        chunks = _ingest_file(file_path, root)
+        if chunks:
+            chunks_by_path[chunks[0].source_path] = chunks
     return Corpus(chunks_by_path=chunks_by_path)

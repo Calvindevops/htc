@@ -42,6 +42,18 @@ def _safe_provider() -> str:
         return "unknown"
 
 
+def _sources_stale(root: str) -> int | None:
+    """Best-effort `sources_stale` count for eval run records — `None` (and
+    thus omitted from the record) when no memory manifest exists yet, so
+    this never breaks a repo that hasn't run `htc refresh`."""
+    try:
+        from .world_model.maintain import count_stale
+
+        return count_stale(FilesystemAdapter(root).sources(), root)
+    except Exception:
+        return None
+
+
 def _cmd_twin(args: argparse.Namespace) -> int:
     adapter = FilesystemAdapter(args.root)
     params = twin_server_params(adapter, graph_path=args.graph)
@@ -155,7 +167,11 @@ def _cmd_eval(args: argparse.Namespace) -> int:
     if args.compare:
         before = load_results(args.compare)
         print(render_compare(before, result))
-    history.record_run(args.root, "eval", {"score": result.score, "num_goldens": len(goldens)})
+    eval_summary = {"score": result.score, "num_goldens": len(goldens)}
+    stale = _sources_stale(args.root)
+    if stale is not None:
+        eval_summary["sources_stale"] = stale
+    history.record_run(args.root, "eval", eval_summary)
     telemetry.track(
         "eval_completed",
         {"score_bucket": telemetry.bucket_score(result.score), "num_goldens": len(goldens)},
@@ -364,6 +380,61 @@ def _cmd_graph(args: argparse.Namespace) -> int:
             "duration_bucket": telemetry.bucket_duration(time.perf_counter() - start),
         },
     )
+    return 0
+
+
+def _cmd_refresh(args: argparse.Namespace) -> int:
+    from .world_model.maintain import refresh_memory
+    from .world_model.memory import get_memory_store
+
+    start = time.perf_counter()
+    root_path = Path(args.root).expanduser().resolve()
+    sources = _parse_sources(args.sources) or FilesystemAdapter(str(root_path)).sources()
+    print(f"refreshing memory for {args.root} ...")
+    memory = get_memory_store(root_path)
+    summary = refresh_memory(memory, sources, root_path)
+    print(
+        f"  new={summary['new']} changed={summary['changed']} deleted={summary['deleted']} "
+        f"fresh={summary['fresh']}"
+    )
+    print(
+        f"  chunks_added={summary['chunks_added']} chunks_removed={summary['chunks_removed']} "
+        f"deduped={summary['deduped']}"
+    )
+    history.record_run(args.root, "refresh", summary)
+    telemetry.track(
+        "command_run",
+        {
+            "command": "refresh",
+            "provider": _safe_provider(),
+            "duration_bucket": telemetry.bucket_duration(time.perf_counter() - start),
+        },
+    )
+    return 0
+
+
+def _cmd_memory_status(args: argparse.Namespace) -> int:
+    from .world_model.maintain import check_staleness
+    from .world_model.maintain.state import load_manifest, manifest_path
+
+    root_path = Path(args.root).expanduser().resolve()
+    if not manifest_path(root_path).is_file():
+        print(
+            f"no memory manifest at {root_path}/.htc/memory/manifest.json — "
+            f"run `htc refresh --root {args.root}` first."
+        )
+        return 0
+    sources = _parse_sources(args.sources) or FilesystemAdapter(str(root_path)).sources()
+    manifest = load_manifest(root_path)
+    staleness = check_staleness(sources, root_path, manifest)
+    stale = len(staleness["changed"]) + len(staleness["deleted"])
+    total = stale + len(staleness["fresh"]) + len(staleness["new"])
+    pct = round(100 * stale / total, 1) if total else 0.0
+    print(f"fresh:   {len(staleness['fresh'])}")
+    print(f"changed: {len(staleness['changed'])}")
+    print(f"deleted: {len(staleness['deleted'])}")
+    print(f"new:     {len(staleness['new'])}")
+    print(f"staleness: {pct}%")
     return 0
 
 
@@ -605,6 +676,30 @@ def main(argv: list[str] | None = None) -> int:
         help="also write a Mermaid diagram to .htc/graph/graph.mmd.md",
     )
     p_graph.set_defaults(func=_cmd_graph)
+
+    p_refresh = sub.add_parser(
+        "refresh", help="incrementally refresh memory (new/changed/deleted sources only)"
+    )
+    p_refresh.add_argument("--root", default=".", help="path to the company repo")
+    p_refresh.add_argument(
+        "--sources",
+        action="append",
+        default=None,
+        help="extra source to ingest, 'path' or 'path:kind' (repeatable; "
+        "defaults to the repo via the filesystem adapter)",
+    )
+    p_refresh.set_defaults(func=_cmd_refresh)
+
+    p_mem_status = sub.add_parser("memory-status", help="show memory staleness vs the last refresh")
+    p_mem_status.add_argument("--root", default=".", help="path to the company repo")
+    p_mem_status.add_argument(
+        "--sources",
+        action="append",
+        default=None,
+        help="extra source to check, 'path' or 'path:kind' (repeatable; "
+        "defaults to the repo via the filesystem adapter)",
+    )
+    p_mem_status.set_defaults(func=_cmd_memory_status)
 
     p_hist = sub.add_parser("history", help="show run history and score trend")
     p_hist.add_argument("--root", required=True, help="path to the company repo")
