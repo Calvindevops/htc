@@ -344,6 +344,55 @@ def _cmd_wiki(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_ask(args: argparse.Namespace) -> int:
+    from .world_model.build import build_memory
+    from .world_model.graph import build_graph
+    from .world_model.ingest import ingest_sources
+    from .world_model.synthesis import answer_question
+
+    start = time.perf_counter()
+    root_path = Path(args.root).expanduser().resolve()
+    sources = _parse_sources(args.sources) or FilesystemAdapter(str(root_path)).sources()
+
+    memory = _build_reranking_memory(args.root, sources, args.rerank)
+    if memory is None:
+        memory = build_memory(sources, root_path)
+
+    graph = None
+    if args.graph:
+        chunks = ingest_sources(sources, root=root_path).all_chunks()
+        graph = build_graph(chunks, root_path)
+
+    print(f"synthesizing an answer for {args.root} ...")
+    answer = answer_question(args.question, memory, graph=graph, model=args.model)
+
+    print(f"\n{answer.answer_md}\n")
+    print("Sources:")
+    for path in answer.citations:
+        print(f"  - {path}")
+    if not answer.citations:
+        print("  (none)")
+    print("\nGaps:")
+    for gap in answer.gaps:
+        print(f"  - {gap}")
+    if not answer.gaps:
+        print("  (none)")
+    print(f"\nConfidence: {answer.confidence}")
+
+    history.record_run(
+        args.root, "ask", {"question": args.question, "confidence": answer.confidence}
+    )
+    telemetry.track(
+        "command_run",
+        {
+            "command": "ask",
+            "provider": _safe_provider(),
+            "duration_bucket": telemetry.bucket_duration(time.perf_counter() - start),
+        },
+    )
+    return 0
+
+
 def _cmd_graph(args: argparse.Namespace) -> int:
     from .world_model.graph import build_graph, graph_json_path
     from .world_model.ingest import ingest_sources
@@ -660,6 +709,33 @@ def main(argv: list[str] | None = None) -> int:
         "BYO key via env — see HTC_RERANKER)",
     )
     p_wiki.set_defaults(func=_cmd_wiki)
+
+    p_ask = sub.add_parser(
+        "ask", help="synthesize a grounded, cited answer to a question from the whole memory"
+    )
+    p_ask.add_argument("question", help="the question to answer")
+    p_ask.add_argument("--root", default=".", help="path to the company repo")
+    p_ask.add_argument("--model", default=None, help="generation model override")
+    p_ask.add_argument(
+        "--sources",
+        action="append",
+        default=None,
+        help="extra source to ingest, 'path' or 'path:kind' (repeatable; "
+        "defaults to the repo via the filesystem adapter)",
+    )
+    p_ask.add_argument(
+        "--rerank",
+        default="none",
+        choices=("none", "zerank", "cohere", "voyage", "local"),
+        help="rerank retrieved chunks for precision before synthesizing (default none; "
+        "BYO key via env — see HTC_RERANKER)",
+    )
+    p_ask.add_argument(
+        "--graph",
+        action="store_true",
+        help="also build the knowledge graph and use it as an extra retrieval signal/context",
+    )
+    p_ask.set_defaults(func=_cmd_ask)
 
     p_graph = sub.add_parser("graph", help="build the self-wiring knowledge graph (zero LLM calls)")
     p_graph.add_argument("--root", default=".", help="path to the company repo")
