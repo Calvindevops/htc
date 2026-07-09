@@ -17,7 +17,9 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Callable
 
+from ..adapters.base import Source
 from ..llm import LLMError, complete, extract_json
+from ..world_model.ingest import Corpus, SourceChunk, ingest_sources
 
 CATEGORIES = ("architecture", "config", "behavior", "ops")
 SKIP_DIRS = {
@@ -192,7 +194,26 @@ def _read_clipped(path: Path) -> str:
     return text if len(text) <= MAX_FILE_CHARS else text[:MAX_FILE_CHARS] + "\n...[truncated]"
 
 
-def _validate(items: list[dict], root: Path) -> list[Golden]:
+def _artifact_is_grounded(artifact: str, root: Path, corpus: Corpus | None) -> bool:
+    """True if `artifact` is a real repo file (default/fallback check, unchanged)
+    or a path the ingested `corpus` actually holds (docs/PDFs/transcripts)."""
+    if (root / artifact).is_file():
+        return True
+    return corpus is not None and corpus.has_source(artifact)
+
+
+def _sample_corpus_chunks(
+    corpus: Corpus | None, count: int, rng: random.Random
+) -> list[SourceChunk]:
+    if corpus is None:
+        return []
+    chunks = corpus.all_chunks()
+    if not chunks:
+        return []
+    return rng.sample(chunks, min(count, len(chunks)))
+
+
+def _validate(items: list[dict], root: Path, corpus: Corpus | None = None) -> list[Golden]:
     goldens: list[Golden] = []
     for item in items:
         try:
@@ -211,8 +232,9 @@ def _validate(items: list[dict], root: Path) -> list[Golden]:
             continue
         if golden.difficulty not in (1, 2, 3):
             continue
-        # The grounding gate: the cited artifact must exist in the repo.
-        if not (root / golden.artifact).is_file():
+        # The grounding gate: the cited artifact must be a real repo file, or
+        # (when generating over an ingested corpus) a real ingested source path.
+        if not _artifact_is_grounded(golden.artifact, root, corpus):
             continue
         # Hard guarantee: never ground a golden in a test/fixture/snapshot file.
         if any(marker in golden.artifact for marker in TEST_MARKERS):
@@ -240,15 +262,22 @@ def generate_goldens(
     model: str | None = None,
     balance: bool = False,
     on_batch: Callable[[int, int], None] | None = None,
+    sources: list[Source] | None = None,
 ) -> list[Golden]:
     """Generate ~`count` validated goldens for the repo at `root`.
 
     `balance` steers each batch's prompt toward categories under-represented
     so far (a hint, not a hard quota). `on_batch(batch_index, running_total)`
     fires after each batch's accepted items are folded in.
+
+    `sources`, when given, are ingested into a `Corpus` (docs/PDFs/transcripts,
+    per `Source.kind`) and sampled alongside repo files each batch; goldens can
+    then be grounded in an ingested doc path, not only a filesystem file.
+    `sources=None` (the default) is byte-for-byte today's repo-only behavior.
     """
     root_path = Path(root).expanduser().resolve()
     rng = random.Random(seed)
+    corpus = ingest_sources(sources, root_path) if sources else None
     goldens: list[Golden] = []
     seen_questions: set[str] = set()
     category_counts: Counter = Counter()
@@ -260,12 +289,15 @@ def generate_goldens(
     while len(goldens) < count and attempts < max(batches, count):
         attempts += 1
         files = _sample_files(root_path, FILES_PER_BATCH, rng)
-        if not files:
+        chunks = _sample_corpus_chunks(corpus, FILES_PER_BATCH, rng)
+        if not files and not chunks:
             break
         sections = []
         for f in files:
             rel = f.relative_to(root_path).as_posix()
             sections.append(f"=== FILE: {rel} ===\n{_read_clipped(f)}")
+        for chunk in chunks:
+            sections.append(f"=== FILE: {chunk.source_path} ===\n{chunk.text}")
         prompt = (
             "Repo files below. Generate 5-7 golden questions grounded in them.\n\n"
             + "\n\n".join(sections)
@@ -286,7 +318,7 @@ def generate_goldens(
             continue
         if not isinstance(items, list):
             continue
-        for golden in _validate(items, root_path):
+        for golden in _validate(items, root_path, corpus=corpus):
             if golden.question in seen_questions:
                 continue
             seen_questions.add(golden.question)

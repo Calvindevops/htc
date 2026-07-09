@@ -15,6 +15,8 @@ dependencies = [
 [project.optional-dependencies]
 # RL chamber (heavy) — install when training, not just for measure/fix.
 rl = ["openpipe-art"]
+# Multi-format doc ingestion (PDF/DOCX/PPTX/XLSX) — core stays dependency-light.
+ingest = ["pypdf>=4", "python-docx>=1", "python-pptx>=0.6", "openpyxl>=3"]
 dev = ["pytest>=8", "ruff>=0.5", "black>=24"]
 
 [project.scripts]
