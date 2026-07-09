@@ -239,6 +239,41 @@ def _cmd_handbook(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_studio(args: argparse.Namespace) -> int:
+    from .world_model.render import generate_diagram, generate_podcast_script, render_audio
+
+    start = time.perf_counter()
+    sources = _parse_sources(args.sources)
+    root_path = Path(args.root).expanduser().resolve()
+    print(f"generating {args.kind} studio artifact for {args.root} ...")
+
+    if args.kind == "podcast":
+        script = generate_podcast_script(args.root, sources=sources, model=args.model)
+        out = root_path / ".htc" / "studio" / "overview-script.md"
+        print(f"podcast script -> {out}")
+        audio_out = root_path / ".htc" / "studio" / "overview.mp3"
+        audio_path = render_audio(script, audio_out)
+        if audio_path:
+            print(f"audio -> {audio_path}")
+        else:
+            print("script only (set HTC_TTS_* to render audio)")
+    else:
+        generate_diagram(args.root, sources=sources, model=args.model, kind=args.kind)
+        out = root_path / ".htc" / "studio" / "architecture.mmd.md"
+        print(f"{args.kind} diagram -> {out}")
+
+    history.record_run(args.root, "studio", {"kind": args.kind})
+    telemetry.track(
+        "command_run",
+        {
+            "command": "studio",
+            "provider": _safe_provider(),
+            "duration_bucket": telemetry.bucket_duration(time.perf_counter() - start),
+        },
+    )
+    return 0
+
+
 def _cmd_history(args: argparse.Namespace) -> int:
     entries = history.load_history(args.root)
     if not entries:
@@ -410,6 +445,26 @@ def main(argv: list[str] | None = None) -> int:
         "defaults to the repo via the filesystem adapter)",
     )
     p_hand.set_defaults(func=_cmd_handbook)
+
+    p_studio = sub.add_parser(
+        "studio", help="render human-facing artifacts (diagram/mindmap/podcast) from memory"
+    )
+    p_studio.add_argument("--root", default=".", help="path to the company repo")
+    p_studio.add_argument(
+        "--kind",
+        default="diagram",
+        choices=("diagram", "mindmap", "podcast"),
+        help="artifact to render (default diagram)",
+    )
+    p_studio.add_argument("--model", default=None, help="generation model override")
+    p_studio.add_argument(
+        "--sources",
+        action="append",
+        default=None,
+        help="extra source to ingest, 'path' or 'path:kind' (repeatable; "
+        "defaults to the repo via the filesystem adapter)",
+    )
+    p_studio.set_defaults(func=_cmd_studio)
 
     p_hist = sub.add_parser("history", help="show run history and score trend")
     p_hist.add_argument("--root", required=True, help="path to the company repo")
