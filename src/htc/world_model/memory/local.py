@@ -40,6 +40,7 @@ from pathlib import Path
 import httpx
 
 from ...llm import _post
+from ..fusion import RRF_K, reciprocal_rank_fusion
 from ..graph.graph import KnowledgeGraph
 from ..ingest.model import SourceChunk
 from .secrets import load_secret, save_secret
@@ -51,8 +52,9 @@ _TOKEN = re.compile(r"[a-z0-9]+")
 _K1 = 1.5
 _B = 0.75
 
-# Reciprocal Rank Fusion constant (standard default).
-_RRF_K = 60
+# Reciprocal Rank Fusion constant (standard default), re-exported from the
+# shared `fusion` module for backward compatibility.
+_RRF_K = RRF_K
 
 
 def _tokenize(text: str) -> list[str]:
@@ -284,11 +286,9 @@ def _cosine(a: list[float], b: list[float]) -> float | None:
 def _rrf_fuse(rankings: list[list[str]], k: int = _RRF_K) -> dict[str, float]:
     """Reciprocal Rank Fusion: combine multiple best-first id rankings into
     one fused score per id. Missing from a ranking simply contributes 0."""
-    scores: dict[str, float] = {}
-    for ranking in rankings:
-        for rank, id_ in enumerate(ranking, start=1):
-            scores[id_] = scores.get(id_, 0.0) + 1.0 / (k + rank)
-    return scores
+    assert k == RRF_K, "custom RRF k is not supported by the shared fusion core"
+    fused = reciprocal_rank_fusion(rankings, key=lambda id_: id_)
+    return {id_: score for id_, score in fused}
 
 
 class LocalMemoryStore:

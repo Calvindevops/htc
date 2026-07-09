@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import os
 
+from ..fusion import reciprocal_rank_fusion
 from ..graph.graph import KnowledgeGraph
 from ..memory.store import MemoryStore, SearchResult
 from ..rerank.base import NoOpReranker, Reranker
@@ -18,23 +19,13 @@ from .transform import decompose, expand, hyde, multi_query
 
 STRATEGIES = ("none", "expand", "hyde", "decompose", "multi")
 
-# Reciprocal Rank Fusion constant (standard default, matches local.py).
-_RRF_K = 60
-
 
 def _rrf_fuse_results(rankings: list[list[SearchResult]]) -> list[SearchResult]:
     """Reciprocal Rank Fusion across multiple per-variant result rankings,
     deduped by chunk id (the first ranking a chunk id appears in wins the
     `SearchResult` kept; only the RRF score is recomputed), best-first."""
-    scores: dict[str, float] = {}
-    best_result: dict[str, SearchResult] = {}
-    for ranking in rankings:
-        for rank, result in enumerate(ranking, start=1):
-            chunk_id = result.chunk.id
-            scores[chunk_id] = scores.get(chunk_id, 0.0) + 1.0 / (_RRF_K + rank)
-            best_result.setdefault(chunk_id, result)
-    ordered_ids = sorted(scores, key=lambda id_: (-scores[id_], id_))
-    return [SearchResult(chunk=best_result[id_].chunk, score=scores[id_]) for id_ in ordered_ids]
+    fused = reciprocal_rank_fusion(rankings, key=lambda result: result.chunk.id)
+    return [SearchResult(chunk=result.chunk, score=score) for result, score in fused]
 
 
 def retrieve_with_transform(
