@@ -41,6 +41,7 @@ import httpx
 
 from ...llm import _post
 from ..ingest.model import SourceChunk
+from .secrets import load_secret, save_secret
 from .store import SearchResult
 
 _TOKEN = re.compile(r"[a-z0-9]+")
@@ -73,7 +74,7 @@ No embedding backend is configured — HTC can search purely by keyword (BM25)
 or semantically. Pick one:
 
   (a) Ollama local [recommended] — free, private (run: ollama pull nomic-embed-text)
-  (b) Cloud endpoint — set HTC_EMBED_BASE_URL / HTC_EMBED_API_KEY / HTC_EMBED_MODEL yourself
+  (b) Cloud endpoint — paste your base URL / model / API key (key is saved encrypted)
   (c) fastembed — bundled local CPU model, zero config (pip install htc[embed])
   (d) BM25 only — keyword search, no embeddings
 
@@ -81,13 +82,26 @@ Choice [a/b/c/d]: """
 
 _WIZARD_CHOICES = {"a": "ollama", "b": "cloud", "c": "fastembed", "d": "bm25"}
 
+_CLOUD_BASE_URL_PROMPT = "Cloud base URL (OpenAI-compatible /embeddings API): "
+_CLOUD_MODEL_PROMPT = "Model name (e.g. text-embedding-3-small): "
+_CLOUD_API_KEY_PROMPT = "API key (saved encrypted, never written to config.json): "
+
 
 def _embed_config() -> tuple[str, str, str] | None:
     """Return (base_url, api_key, model) for the remote cloud embeddings
-    endpoint, or `None` if not fully configured."""
+    endpoint, or `None` if not fully configured. Precedence per field: the
+    `HTC_EMBED_*` env vars first; if those aren't all set, fall back to the
+    wizard's saved cloud config — `embed_base_url`/`embed_model` from
+    `~/.htc/config.json`, and the API key from the encrypted secret store
+    (`secrets.load_secret`), never from the plaintext config file."""
     base = os.environ.get("HTC_EMBED_BASE_URL")
     key = os.environ.get("HTC_EMBED_API_KEY")
     model = os.environ.get("HTC_EMBED_MODEL")
+    if not (base and key and model):
+        config = _load_global_config()
+        base = base or config.get("embed_base_url")
+        model = model or config.get("embed_model")
+        key = key or load_secret("embedding_api_key")
     if not base or not key or not model:
         return None
     return base.rstrip("/"), key, model
@@ -175,12 +189,28 @@ def _prompt_embedder_choice() -> str:
     return _WIZARD_CHOICES.get(answer, "ollama")
 
 
+def _prompt_cloud_config() -> tuple[str, str, str]:
+    """Collect the cloud/BYO provider's base URL, model, and API key. The
+    key is only ever returned to the caller so it can be routed through
+    `secrets.save_secret` — it must never land in the saved config dict."""
+    try:
+        base_url = input(_CLOUD_BASE_URL_PROMPT).strip()
+        model = input(_CLOUD_MODEL_PROMPT).strip()
+        api_key = input(_CLOUD_API_KEY_PROMPT).strip()
+    except (EOFError, OSError):
+        return "", "", ""
+    return base_url, model, api_key
+
+
 def _maybe_run_wizard(ollama_reachable: bool) -> None:
     """First-boot wizard: only runs when nothing is configured or reachable
     yet (no cloud config, no Ollama, no saved preference) and the session is
     interactive. Saves the choice to `~/.htc/config.json` so it's asked at
     most once. Non-interactive runs (`HTC_EMBED_NONINTERACTIVE=1` or no TTY)
-    skip the prompt silently and fall through the precedence order."""
+    skip the prompt silently and fall through the precedence order. If the
+    cloud/BYO provider is chosen, its API key is saved ENCRYPTED via
+    `secrets.save_secret` — only the non-secret base URL/model land in the
+    plaintext `~/.htc/config.json`."""
     if ollama_reachable:
         return
     config = _load_global_config()
@@ -189,7 +219,14 @@ def _maybe_run_wizard(ollama_reachable: bool) -> None:
     if os.environ.get("HTC_EMBED_NONINTERACTIVE") == "1" or not sys.stdin.isatty():
         return
     choice = _prompt_embedder_choice()
-    _save_global_config({**config, "embed_backend": choice})
+    updated = {**config, "embed_backend": choice}
+    if choice == "cloud":
+        base_url, model, api_key = _prompt_cloud_config()
+        updated["embed_base_url"] = base_url
+        updated["embed_model"] = model
+        if api_key:
+            save_secret("embedding_api_key", api_key)
+    _save_global_config(updated)
 
 
 def _saved_preference_is_bm25() -> bool:

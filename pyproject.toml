@@ -20,7 +20,7 @@ ingest = ["pypdf>=4", "python-docx>=1", "python-pptx>=0.6", "openpyxl>=3"]
 # Local semantic embeddings (BAAI/bge-small-en-v1.5 via fastembed, CPU, no
 # network) — the offline FALLBACK embedder for the local memory backend when
 # neither Ollama (recommended default) nor a cloud endpoint is available.
-embed = ["fastembed>=0.3"]
+embed = ["fastembed>=0.3", "keyring>=24"]
 # Sentry error tracking — opt-in via HTC_SENTRY_DSN, not installed by default.
 telemetry = ["sentry-sdk>=2"]
 dev = ["pytest>=8", "ruff>=0.5", "black>=24"]
