@@ -304,6 +304,45 @@ def _cmd_wiki(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_graph(args: argparse.Namespace) -> int:
+    from .world_model.graph import build_graph, graph_json_path
+    from .world_model.ingest import ingest_sources
+
+    start = time.perf_counter()
+    root_path = Path(args.root).expanduser().resolve()
+    sources = _parse_sources(args.sources) or FilesystemAdapter(str(root_path)).sources()
+    print(f"building knowledge graph for {args.root} (zero LLM calls) ...")
+    chunks = ingest_sources(sources, root=root_path).all_chunks()
+    if not chunks:
+        print("no chunks ingested — nothing to build a graph from.")
+        return 1
+
+    graph = build_graph(chunks, root_path)
+    entities, relations = graph.entities(), graph.relations()
+    print(f"{len(entities)} entities, {len(relations)} relations")
+    for entity in graph.top_entities(10):
+        print(f"  {entity.kind:<11} {entity.name} ({entity.mentions})")
+    print(f"graph -> {graph_json_path(root_path)}")
+
+    if args.mermaid:
+        mmd_path = root_path / ".htc" / "graph" / "graph.mmd.md"
+        mmd_path.write_text(graph.to_mermaid())
+        print(f"mermaid -> {mmd_path}")
+
+    history.record_run(
+        args.root, "graph", {"num_entities": len(entities), "num_relations": len(relations)}
+    )
+    telemetry.track(
+        "command_run",
+        {
+            "command": "graph",
+            "provider": _safe_provider(),
+            "duration_bucket": telemetry.bucket_duration(time.perf_counter() - start),
+        },
+    )
+    return 0
+
+
 def _cmd_history(args: argparse.Namespace) -> int:
     entries = history.load_history(args.root)
     if not entries:
@@ -505,6 +544,22 @@ def main(argv: list[str] | None = None) -> int:
         "--topics", default=None, help="comma-separated topics (default: inferred from memory)"
     )
     p_wiki.set_defaults(func=_cmd_wiki)
+
+    p_graph = sub.add_parser("graph", help="build the self-wiring knowledge graph (zero LLM calls)")
+    p_graph.add_argument("--root", default=".", help="path to the company repo")
+    p_graph.add_argument(
+        "--sources",
+        action="append",
+        default=None,
+        help="extra source to ingest, 'path' or 'path:kind' (repeatable; "
+        "defaults to the repo via the filesystem adapter)",
+    )
+    p_graph.add_argument(
+        "--mermaid",
+        action="store_true",
+        help="also write a Mermaid diagram to .htc/graph/graph.mmd.md",
+    )
+    p_graph.set_defaults(func=_cmd_graph)
 
     p_hist = sub.add_parser("history", help="show run history and score trend")
     p_hist.add_argument("--root", required=True, help="path to the company repo")

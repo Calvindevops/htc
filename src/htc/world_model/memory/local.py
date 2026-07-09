@@ -40,6 +40,7 @@ from pathlib import Path
 import httpx
 
 from ...llm import _post
+from ..graph.graph import KnowledgeGraph
 from ..ingest.model import SourceChunk
 from .secrets import load_secret, save_secret
 from .store import SearchResult
@@ -389,7 +390,29 @@ class LocalMemoryStore:
         scored.sort(key=lambda pair: (-pair[0], pair[1]))
         return [id_ for _, id_ in scored]
 
-    def search(self, query: str, k: int = 5) -> list[SearchResult]:
+    def _graph_ranking(
+        self, query: str, chunks: list[SourceChunk], graph: KnowledgeGraph
+    ) -> list[str]:
+        """Best-first chunk ids that mention a query-relevant graph entity
+        (from `graph.subgraph_for_query`) in their path or text — an
+        ADDITIONAL signal fused via RRF, never a replacement for BM25/semantic
+        ranking. Chunks with no graph-entity match are simply absent."""
+        relevant_names = {entity.name for entity in graph.subgraph_for_query(query, k=20)}
+        if not relevant_names:
+            return []
+        scored: list[tuple[int, str]] = []
+        for chunk in chunks:
+            hits = sum(
+                1 for name in relevant_names if name in chunk.source_path or name in chunk.text
+            )
+            if hits > 0:
+                scored.append((hits, chunk.id))
+        scored.sort(key=lambda pair: (-pair[0], pair[1]))
+        return [chunk_id for _, chunk_id in scored]
+
+    def search(
+        self, query: str, k: int = 5, graph: KnowledgeGraph | None = None
+    ) -> list[SearchResult]:
         query_terms = _tokenize(query)
         if not query_terms or not self._chunks_by_id:
             return []
@@ -397,16 +420,22 @@ class LocalMemoryStore:
         chunks = self._all_sorted()
         scored = self._bm25_scored(chunks, set(query_terms))
         scored.sort(key=lambda pair: (-pair[0], pair[1].id))
-
-        if not _embedder_available():
-            return [SearchResult(chunk=chunk, score=score) for score, chunk in scored[:k]]
-
-        semantic_ranking = self._semantic_ranking(query)
-        if not semantic_ranking:
-            return [SearchResult(chunk=chunk, score=score) for score, chunk in scored[:k]]
-
         bm25_ranking = [chunk.id for _, chunk in scored]
-        fused = _rrf_fuse([bm25_ranking, semantic_ranking])
+
+        rankings = [bm25_ranking]
+        if _embedder_available():
+            semantic_ranking = self._semantic_ranking(query)
+            if semantic_ranking:
+                rankings.append(semantic_ranking)
+        if graph is not None:
+            graph_ranking = self._graph_ranking(query, chunks, graph)
+            if graph_ranking:
+                rankings.append(graph_ranking)
+
+        if len(rankings) == 1:
+            return [SearchResult(chunk=chunk, score=score) for score, chunk in scored[:k]]
+
+        fused = _rrf_fuse(rankings)
         chunk_by_id = {chunk.id: chunk for chunk in chunks}
         ordered_ids = sorted(fused, key=lambda id_: (-fused[id_], id_))
         return [SearchResult(chunk=chunk_by_id[id_], score=fused[id_]) for id_ in ordered_ids[:k]]
