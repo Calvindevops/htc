@@ -11,10 +11,13 @@ from __future__ import annotations
 import argparse
 import asyncio
 import sys
+import time
 from pathlib import Path
 
+from . import history, telemetry
 from .adapters.base import Source
 from .adapters.filesystem import FilesystemAdapter
+from .errors_tracking import capture_exception, init_error_tracking
 from .llm import LLMError
 from .sandbox import SandboxConfig, SandboxError
 from .twin.server import list_tools, twin_server_params
@@ -24,6 +27,16 @@ HTC_DIR = ".htc"
 
 def _htc_path(root: str, name: str) -> Path:
     return Path(root).expanduser().resolve() / HTC_DIR / name
+
+
+def _safe_provider() -> str:
+    """Best-effort provider name for telemetry buckets; never raises."""
+    try:
+        from .llm import _pick_provider
+
+        return _pick_provider(None)
+    except Exception:
+        return "unknown"
 
 
 def _cmd_twin(args: argparse.Namespace) -> int:
@@ -40,6 +53,8 @@ def _cmd_twin(args: argparse.Namespace) -> int:
 
 def _cmd_goldens(args: argparse.Namespace) -> int:
     from .goldens import generate_goldens, save_goldens
+
+    start = time.perf_counter()
 
     def on_batch(batch_index: int, running_total: int) -> None:
         print(f"  batch {batch_index}: {running_total} goldens so far", file=sys.stderr)
@@ -70,6 +85,16 @@ def _cmd_goldens(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
     print(f"next: htc eval --root {args.root}")
+    history.record_run(args.root, "goldens", {"count": len(goldens), "categories": categories})
+    telemetry.track(
+        "command_run",
+        {
+            "command": "goldens",
+            "repo_size_bucket": telemetry.bucket_repo_size(len(goldens)),
+            "provider": _safe_provider(),
+            "duration_bucket": telemetry.bucket_duration(time.perf_counter() - start),
+        },
+    )
     return 0
 
 
@@ -78,6 +103,7 @@ def _cmd_eval(args: argparse.Namespace) -> int:
     from .evaluation.runner import ItemResult, load_results, run_eval, save_results
     from .goldens import load_goldens
 
+    start = time.perf_counter()
     goldens_path = Path(args.goldens) if args.goldens else _htc_path(args.root, "goldens.json")
     if not goldens_path.is_file():
         print(f"no goldens at {goldens_path} — run `htc goldens --root {args.root}` first.")
@@ -126,6 +152,20 @@ def _cmd_eval(args: argparse.Namespace) -> int:
     if args.compare:
         before = load_results(args.compare)
         print(render_compare(before, result))
+    history.record_run(args.root, "eval", {"score": result.score, "num_goldens": len(goldens)})
+    telemetry.track(
+        "eval_completed",
+        {"score_bucket": telemetry.bucket_score(result.score), "num_goldens": len(goldens)},
+    )
+    telemetry.track(
+        "command_run",
+        {
+            "command": "eval",
+            "repo_size_bucket": telemetry.bucket_repo_size(len(goldens)),
+            "provider": _safe_provider(),
+            "duration_bucket": telemetry.bucket_duration(time.perf_counter() - start),
+        },
+    )
     return 0
 
 
@@ -133,6 +173,7 @@ def _cmd_onboard(args: argparse.Namespace) -> int:
     from .evaluation.runner import load_results
     from .onboard import write_context_pack
 
+    start = time.perf_counter()
     results_path = Path(args.results) if args.results else _htc_path(args.root, "results.json")
     if not results_path.is_file():
         print(f"no eval results at {results_path} — run `htc eval --root {args.root}` first.")
@@ -140,6 +181,17 @@ def _cmd_onboard(args: argparse.Namespace) -> int:
     result = load_results(results_path)
     print(f"drafting context pack from {results_path} (score {result.score}) ...")
     draft = write_context_pack(args.root, result, model=args.model)
+    history.record_run(
+        args.root, "onboard", {"score": result.score, "gaps_found": draft is not None}
+    )
+    telemetry.track(
+        "command_run",
+        {
+            "command": "onboard",
+            "provider": _safe_provider(),
+            "duration_bucket": telemetry.bucket_duration(time.perf_counter() - start),
+        },
+    )
     if draft is None:
         print("no knowledge gaps — the agent scored perfectly. Nothing to onboard.")
         return 0
@@ -166,11 +218,34 @@ def _parse_sources(raw: list[str] | None) -> list[Source] | None:
 def _cmd_handbook(args: argparse.Namespace) -> int:
     from .handbook import DRAFT_NAME, generate_handbook
 
+    start = time.perf_counter()
     sources = _parse_sources(args.sources)
     print(f"generating handbook for {args.root} ...")
     generate_handbook(args.root, sources=sources, model=args.model)
     draft = Path(args.root).expanduser().resolve() / DRAFT_NAME
     print(f"handbook -> {draft}")
+    history.record_run(args.root, "handbook", {"num_sources": len(sources) if sources else 0})
+    telemetry.track(
+        "command_run",
+        {
+            "command": "handbook",
+            "provider": _safe_provider(),
+            "duration_bucket": telemetry.bucket_duration(time.perf_counter() - start),
+        },
+    )
+    return 0
+
+
+def _cmd_history(args: argparse.Namespace) -> int:
+    entries = history.load_history(args.root)
+    if not entries:
+        print(f"no run history at {args.root} yet — run goldens/eval/onboard/handbook first.")
+        return 0
+    for entry in entries:
+        print(f"  [{entry['index']}] {entry['kind']:<9} {entry['summary']}")
+    trend = history.score_trend(args.root)
+    if trend:
+        print("\nscore trend: " + " -> ".join(str(s) for s in trend))
     return 0
 
 
@@ -264,16 +339,26 @@ def main(argv: list[str] | None = None) -> int:
     )
     p_hand.set_defaults(func=_cmd_handbook)
 
+    p_hist = sub.add_parser("history", help="show run history and score trend")
+    p_hist.add_argument("--root", required=True, help="path to the company repo")
+    p_hist.set_defaults(func=_cmd_history)
+
     for name in ("ingest", "train", "loop"):
         p = sub.add_parser(name, help=f"{name} (not yet implemented)")
         p.set_defaults(func=_not_yet)
 
     args = parser.parse_args(argv)
+    init_error_tracking()
+    telemetry.ensure_preference()
     try:
         return args.func(args)
     except LLMError as err:
         print(f"error: {err}", file=sys.stderr)
+        capture_exception(err)
         return 2
+    except Exception as err:
+        capture_exception(err)
+        raise
 
 
 if __name__ == "__main__":
