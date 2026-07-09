@@ -1,6 +1,6 @@
 [project]
 name = "htc"
-version = "0.2.0"
+version = "1.0.0"
 description = "Hyperbolic Time Chamber — onboard AI agents to your company in an afternoon: measure what they don't know, generate the fix, train them native."
 readme = "README.md"
 requires-python = ">=3.11"
