@@ -1,96 +1,120 @@
 # Hyperbolic Time Chamber (HTC)
 
-**Onboard AI agents to your company in an afternoon, not a quarter.**
+**Measure how well an AI agent knows your codebase — and your company — then close the gap.**
 
-Your agents don't know your business. Every new agent session starts cold — and
-teams burn weeks hand-writing context files, re-explaining the same tribal
-knowledge, and guessing whether any of it worked. HTC compresses that time,
-like its namesake chamber: **measure** what agents don't know about your
-company, **generate** the knowledge pack that fixes it, and — when you want the
-ceiling — **train** an open model that's natively fluent in your business.
+Your agents start every session cold. Teams burn weeks hand-writing `CLAUDE.md`
+files, re-explaining the same tribal knowledge, and guessing whether any of it
+helped. HTC makes it measurable: **measure** what an agent doesn't know,
+**generate** the context that fixes it, and **prove** the before/after.
 
 ```
-Rung 1  MEASURE   htc goldens · htc eval   → repo-specific exam + Agent-Ready score
-Rung 2  FIX       htc onboard              → context pack from the gaps, re-eval the delta
-Rung 3  TRAIN     htc train [rl extra]     → GRPO-train an open model company-native
+MEASURE   htc goldens · htc eval     → a knowledge exam + Agent-Ready score
+FIX       htc onboard · htc handbook → the context pack / handbook that closes gaps
+ORIENT    htc studio                 → architecture diagrams + an audio-overview script
+VALIDATE  htc study                  → prove the score predicts real task quality
 ```
 
-## Quickstart
+## Quickstart (code-scope — works today, no setup beyond a key)
 
 ```bash
 pip install -e .
-export ANTHROPIC_API_KEY=sk-ant-...   # or any OpenAI-compatible endpoint, see below
+export ANTHROPIC_API_KEY=sk-ant-...      # or any OpenAI-compatible endpoint; see Providers
 
-htc goldens --root /path/to/repo      # generate the knowledge exam (~20 questions)
-htc eval    --root /path/to/repo      # score an agent → Agent-Ready scorecard
-htc onboard --root /path/to/repo      # draft AGENTS.md from what it got wrong
-# merge the draft, then prove the delta:
-htc eval    --root /path/to/repo --compare /path/to/repo/.htc/results.json
+htc goldens --root /path/to/repo         # generate a repo-specific knowledge exam
+htc eval    --root /path/to/repo --agent-cmd 'claude -p'   # score YOUR agent
+htc onboard --root /path/to/repo         # draft AGENTS.md from what it got wrong
+htc eval    --root /path/to/repo --compare /path/to/repo/.htc/results.json   # prove the delta
 ```
 
 ![Agent-Ready](https://img.shields.io/badge/Agent--Ready-87%25-brightgreen)
 
-Evaluate **your actual agent** instead of the builtin one:
+## Company-scope (ingest more than code)
+
+HTC ingests arbitrary local sources — code, docs, PDFs, DOCX/PPTX/XLSX, HTML,
+and `.vtt/.srt` transcripts — into a persistent, cited memory, then generates
+company knowledge from it:
 
 ```bash
-htc eval --root . --agent-cmd 'claude -p'   # or any CLI that reads stdin, answers on stdout
+pip install -e '.[ingest]'               # PDF/DOCX/PPTX/XLSX extractors (core stays light)
+
+htc handbook --root .                    # generate a structured Employee Handbook (draft)
+htc goldens  --root . --scope business   # ask company questions, not just code
+htc studio   --root . --kind diagram     # Mermaid architecture diagram from the memory
+htc studio   --root . --kind podcast     # a 2-host audio-overview script
+htc history  --root .                    # your Agent-Ready scores over time
 ```
+
+Everything renders from the same cited memory layer — a local BM25 store by
+default (no external service), with an optional [gBrain](https://github.com/garrytan/gbrain)
+backend for richer retrieval.
+
+## Commands
+
+| Command | What |
+| --- | --- |
+| `htc goldens` | generate a grounded knowledge exam (`--scope code\|business\|auto`) |
+| `htc eval` | score an agent → Agent-Ready scorecard (builtin or `--agent-cmd`) |
+| `htc onboard` | draft `AGENTS.md.htc-draft` from the gaps |
+| `htc handbook` | generate a structured Employee Handbook from ingested sources |
+| `htc studio` | render diagrams / mind-maps / an audio-overview script |
+| `htc study` | run the correlation study that validates the score (`init/run/analyze`) |
+| `htc history` | show your runs + Agent-Ready score trend |
+| `htc twin` | read-only MCP server over your repo |
 
 ## How it works
 
-- **Goldens** — HTC samples your repo (weighted by git churn — the files that
-  change hold the knowledge that matters) and generates grounded Q&A: every
-  question names the `artifact` file a correct answer must cite, and items
-  whose artifact doesn't exist are rejected. No generic trivia.
+- **Goldens** — HTC samples your sources (repo files weighted by git churn; docs
+  via the ingestion layer) and generates grounded Q&A. Every question must cite a
+  real source, must probe a decision / constraint / failure-mode / data-flow, and
+  pure-lookup trivia is rejected. It tests understanding, not recall.
 - **Eval** — an agent answers each golden using read-only, path-confined tools
-  over your repo. An LLM judge grades against the reference answer; citing the
-  right file is part of the rubric. Verdicts roll up into the **Agent-Ready
-  score** (0–100) by category: architecture · config · behavior · ops.
-- **Onboard** — the gaps become `AGENTS.md.htc-draft`: each missing fact stated
-  as operating knowledge with its file pointer. Merge it, re-eval, screenshot
-  the before/after.
+  (it can't read the answer key). An LLM judge grades against the reference and
+  whether the right source was cited → the **Agent-Ready score** (0–100) by
+  category. Runs in parallel; `--agent-cmd 'claude -p'` measures your real agent.
+- **Handbook / studio** — retrieve from the cited memory and generate onboarding
+  artifacts (handbook, diagrams, audio-overview script) grounded in your sources.
+- **Study** — an agent-ladder × task-bank design with blind human grading and a
+  Spearman + bootstrap-CI verdict. This is what earns a "company-ready" claim —
+  until you run it, treat the score as *knowledge coverage*, not a performance guarantee.
 
 ## Providers
 
 | Env | Meaning | Default |
 |-----|---------|---------|
 | `ANTHROPIC_API_KEY` | default provider | — |
-| `HTC_MODEL` | agent/generation model | `claude-sonnet-5` |
-| `HTC_JUDGE_MODEL` | judge model | `HTC_MODEL` |
-| `HTC_LLM_BASE_URL` + `HTC_LLM_API_KEY` | any OpenAI-compatible endpoint | — |
+| `HTC_MODEL` / `HTC_JUDGE_MODEL` | agent-generation / judge model | `claude-sonnet-5` |
+| `HTC_LLM_BASE_URL` + `HTC_LLM_API_KEY` | any OpenAI-compatible endpoint (GLM, DeepSeek, Groq, Nous, local) | — |
+| `HTC_PROVIDER=claude-cli` | run generation/judging on the local Claude CLI (subscription-billed) | auto-detected |
 
-## The extension point
+See `docs/PROVIDERS.md` for worked configs.
 
-Everything is generic via the **`CompanyAdapter`** protocol
-(`src/htc/adapters/base.py`). Core ships `FilesystemAdapter` — point it at any
-directory. A company adapter can bring more sources (`repo | docs | iac |
-schema | tickets`), curated golden Q&A, and its own reward rubric — without
-touching core. Multi-source connectors are the active roadmap.
+## Sandbox, privacy, tracking
 
-## Rung 3 — the RL chamber
+- `htc eval --agent-cmd '…' --sandbox` runs the agent in a Docker container with
+  the repo mounted read-only (isolates untrusted agent commands from your host).
+- **Telemetry is opt-in and off by default** — no phone-home. Error tracking
+  (Sentry) and usage stats (PostHog) activate only when you set their env vars.
+- Run history is local (`.htc/history/`) — your data, your machine.
 
-For teams that want more than context files: `pip install -e '.[rl]'` adds the
-training chamber (built on [OpenPipe ART](https://github.com/openpipe/art),
-GRPO). It reinforcement-trains an open-weight model (e.g. Qwen2.5-Coder LoRA)
-against a read-only **twin** of your company — real reward signals from the
-same goldens pipeline, so the model comes out *measurably* better at your
-business, not just informed. Codebase-specific RL is sold today as a closed
-service; HTC is the open on-ramp.
+## Roadmap
 
-> Status: rungs 1–2 ship in v0.2. The RL chamber is functional scaffolding
-> under active development — see `docs/spec.md` for the phased plan.
+Company-scope ingestion, handbook, studio, and the study harness ship in this
+release. Next: live connectors (Slack/CRM), the Training chamber (RL/GRPO
+fine-tuning of an open model into a company-native agent — the `[rl]` extra), and
+a hosted tier. Building in the open.
 
 ## Layout
 
 | Path | What |
 | --- | --- |
 | `src/htc/adapters/` | `CompanyAdapter` protocol + `FilesystemAdapter` |
-| `src/htc/goldens/` | repo → grounded golden Q&A |
+| `src/htc/goldens/` | sources → grounded golden Q&A (code + business scope) |
 | `src/htc/evaluation/` | agent runner · LLM judge · Agent-Ready scorecard |
-| `src/htc/onboard/` | eval gaps → `AGENTS.md` context pack |
-| `src/htc/twin/` | read-only MCP server over the company |
-| `src/htc/llm.py` | provider-agnostic client (Anthropic / OpenAI-compatible) |
+| `src/htc/onboard/` · `src/htc/handbook/` | context pack · Employee Handbook |
+| `src/htc/world_model/` | ingestion · memory · studio renderers |
+| `src/htc/study/` | correlation-study harness |
+| `src/htc/llm.py` | provider-agnostic client |
 
 ## License
 
-[MIT](./LICENSE). Built on [OpenPipe ART](https://github.com/openpipe/art) (Apache-2.0).
+[MIT](./LICENSE). Optional training extra builds on [OpenPipe ART](https://github.com/openpipe/art) (Apache-2.0).
