@@ -27,3 +27,8 @@ class SourceChunk:
     text: str
     start_char: int
     end_char: int
+    # Optional contextualized text (Anthropic-style Contextual Retrieval): when
+    # set, the embedder embeds THIS instead of `text`, while `text` stays the
+    # original slice for display/citation. `None` (the default) preserves the
+    # exact prior behavior everywhere — embed `text` itself.
+    embed_text: str | None = None

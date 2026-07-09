@@ -234,18 +234,31 @@ def _parse_sources(raw: list[str] | None) -> list[Source] | None:
     return sources
 
 
-def _build_reranking_memory(root: str, sources: list[Source] | None, rerank_name: str):
-    """Build memory and wrap it with a reranker when `--rerank` isn't "none";
-    otherwise return `None` so the caller builds memory itself, unchanged
-    from today's behavior. See HTC_RERANKER / `htc.world_model.rerank`."""
-    if rerank_name == "none":
-        return None
+def _build_reranking_memory(
+    root: str,
+    sources: list[Source] | None,
+    rerank_name: str,
+    *,
+    contextual: bool = False,
+    model: str | None = None,
+):
+    """Build the retrieval memory: ingest + (optionally) contextualize, then
+    wrap with a reranker when `--rerank` isn't "none". Always returns a store
+    (no double-build in callers). See HTC_RERANKER / HTC_CONTEXTUAL_RETRIEVAL."""
     from .world_model.build import build_memory
-    from .world_model.rerank import RerankingMemoryStore, get_reranker
 
     root_path = Path(root).expanduser().resolve()
-    store = build_memory(sources or FilesystemAdapter(str(root_path)).sources(), root_path)
-    return RerankingMemoryStore(store, get_reranker(rerank_name))
+    store = build_memory(
+        sources or FilesystemAdapter(str(root_path)).sources(),
+        root_path,
+        contextual=contextual,
+        model=model,
+    )
+    if rerank_name != "none":
+        from .world_model.rerank import RerankingMemoryStore, get_reranker
+
+        store = RerankingMemoryStore(store, get_reranker(rerank_name))
+    return store
 
 
 def _cmd_handbook(args: argparse.Namespace) -> int:
@@ -254,7 +267,9 @@ def _cmd_handbook(args: argparse.Namespace) -> int:
     start = time.perf_counter()
     sources = _parse_sources(args.sources)
     print(f"generating handbook for {args.root} ...")
-    memory = _build_reranking_memory(args.root, sources, args.rerank)
+    memory = _build_reranking_memory(
+        args.root, sources, args.rerank, contextual=args.contextual, model=args.model
+    )
     generate_handbook(
         args.root,
         sources=sources,
@@ -351,7 +366,6 @@ def _cmd_wiki(args: argparse.Namespace) -> int:
 
 
 def _cmd_ask(args: argparse.Namespace) -> int:
-    from .world_model.build import build_memory
     from .world_model.graph import build_graph
     from .world_model.ingest import ingest_sources
     from .world_model.synthesis import answer_question
@@ -360,9 +374,9 @@ def _cmd_ask(args: argparse.Namespace) -> int:
     root_path = Path(args.root).expanduser().resolve()
     sources = _parse_sources(args.sources) or FilesystemAdapter(str(root_path)).sources()
 
-    memory = _build_reranking_memory(args.root, sources, args.rerank)
-    if memory is None:
-        memory = build_memory(sources, root_path)
+    memory = _build_reranking_memory(
+        args.root, sources, args.rerank, contextual=args.contextual, model=args.model
+    )
 
     graph = None
     if args.graph:
@@ -679,6 +693,12 @@ def main(argv: list[str] | None = None) -> int:
         help="transform each section's retrieval query before searching (default none, "
         "no extra LLM call; see HTC_QUERY_TRANSFORM)",
     )
+    p_hand.add_argument(
+        "--contextual",
+        action="store_true",
+        help="contextual retrieval: an LLM situates each chunk in its document before "
+        "embedding (one LLM call per chunk at ingest; see HTC_CONTEXTUAL_RETRIEVAL)",
+    )
     p_hand.set_defaults(func=_cmd_handbook)
 
     p_studio = sub.add_parser(
@@ -756,6 +776,12 @@ def main(argv: list[str] | None = None) -> int:
         choices=("none", "expand", "hyde", "decompose", "multi"),
         help="transform the retrieval query before searching (default none, no extra "
         "LLM call; see HTC_QUERY_TRANSFORM)",
+    )
+    p_ask.add_argument(
+        "--contextual",
+        action="store_true",
+        help="contextual retrieval: an LLM situates each chunk in its document before "
+        "embedding (one LLM call per chunk at ingest; see HTC_CONTEXTUAL_RETRIEVAL)",
     )
     p_ask.set_defaults(func=_cmd_ask)
 

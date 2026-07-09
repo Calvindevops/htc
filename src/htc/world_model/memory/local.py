@@ -334,7 +334,7 @@ class LocalMemoryStore:
 
         if not _embedder_available() or not chunks:
             return
-        vectors = _embed([chunk.text for chunk in chunks])
+        vectors = _embed([chunk.embed_text or chunk.text for chunk in chunks])
         for chunk, vector in zip(chunks, vectors):
             self._embeddings[chunk.id] = vector
         self._persist_embeddings()
