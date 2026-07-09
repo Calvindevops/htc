@@ -36,6 +36,7 @@ company knowledge from it:
 
 ```bash
 pip install -e '.[ingest]'               # PDF/DOCX/PPTX/XLSX extractors (core stays light)
+pip install -e '.[embed]'                # recommended: local semantic search, zero config (see docs/MEMORY.md)
 
 htc handbook --root .                    # generate a structured Employee Handbook (draft)
 htc goldens  --root . --scope business   # ask company questions, not just code

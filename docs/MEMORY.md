@@ -16,18 +16,26 @@ Selection order: an explicit `backend` argument to `get_memory_store()`
 (for programmatic callers), else the `HTC_MEMORY_BACKEND` env var, else
 `"local"`.
 
-## 1. `local` (default — hybrid BM25 + optional semantic)
+## 1. `local` (default — hybrid BM25 + semantic, semantic on by default)
 
-No external service, no required ML dependency. Works offline out of the
-box: retrieval is BM25 keyword scoring over ingested chunks, persisted to
-`<root>/.htc/memory/chunks.jsonl`.
+No external service required. Retrieval is BM25 keyword scoring over
+ingested chunks, persisted to `<root>/.htc/memory/chunks.jsonl` — this part
+always works offline with zero dependencies.
 
-If you configure an OpenAI-compatible embeddings endpoint, retrieval becomes
-**hybrid**: chunks and queries are embedded, cosine similarity ranks them
-semantically, and the semantic ranking is fused with the BM25 ranking via
-Reciprocal Rank Fusion (RRF, k=60). This catches relevant chunks that share
-no keywords with the query. With no embedding endpoint configured, behavior
-is unchanged — BM25 only.
+**Semantic search is the recommended default.** Install the `embed` extra:
+
+```bash
+pip install "htc[embed]"
+```
+
+With `fastembed` installed, chunks and queries are embedded locally on CPU
+(`BAAI/bge-small-en-v1.5`, no network call, no configuration) and fused with
+BM25 via Reciprocal Rank Fusion (RRF, k=60) — this catches relevant chunks
+that share no keywords with the query. Zero config required: just install
+the extra and retrieval becomes hybrid automatically.
+
+If you'd rather use a remote embeddings endpoint (e.g. OpenAI, or your own),
+set all three of these — they take precedence over the bundled local model:
 
 | Var | Meaning |
 |---|---|
@@ -35,10 +43,12 @@ is unchanged — BM25 only.
 | `HTC_EMBED_API_KEY` | API key for that endpoint. |
 | `HTC_EMBED_MODEL` | Embedding model name. |
 
-All three must be set for hybrid retrieval to activate. Embeddings are
-computed once per chunk (on `add_chunks`) and persisted alongside the chunks
-in a parallel `<root>/.htc/memory/embeddings.jsonl`, so they aren't
-recomputed on later runs.
+Precedence: (1) `HTC_EMBED_BASE_URL` + `HTC_EMBED_API_KEY` + `HTC_EMBED_MODEL`
+if all three are set, (2) else the bundled `fastembed` model if installed,
+(3) else BM25 only. Embeddings are computed once per chunk (on `add_chunks`)
+and persisted alongside the chunks in a parallel
+`<root>/.htc/memory/embeddings.jsonl`, so they aren't recomputed on later
+runs.
 
 ```bash
 export HTC_EMBED_BASE_URL=https://api.openai.com/v1

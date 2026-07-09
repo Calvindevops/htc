@@ -125,6 +125,62 @@ class TestHybridRetrieval:
         assert fused["c"] == pytest.approx(1 / 63)
 
 
+class TestFastEmbedDefaultEmbedder:
+    """Semantic search is on by default via the bundled `fastembed` extra —
+    no `HTC_EMBED_*` config required. `fastembed` isn't an installed
+    dependency here, so it's faked via `sys.modules` (no model download)."""
+
+    def _install_fake_fastembed(self, monkeypatch, vectors_by_text: dict[str, list[float]]):
+        class _FakeTextEmbedding:
+            def __init__(self, model_name: str) -> None:
+                self.model_name = model_name
+
+            def embed(self, texts):
+                return [vectors_by_text[text] for text in texts]
+
+        fake_module = types.ModuleType("fastembed")
+        fake_module.TextEmbedding = _FakeTextEmbedding
+        monkeypatch.setitem(sys.modules, "fastembed", fake_module)
+        local_module._fastembed_model_cache.clear()
+
+    def test_fastembed_used_when_no_remote_endpoint_configured(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("HTC_EMBED_BASE_URL", raising=False)
+        monkeypatch.delenv("HTC_EMBED_API_KEY", raising=False)
+        monkeypatch.delenv("HTC_EMBED_MODEL", raising=False)
+        self._install_fake_fastembed(monkeypatch, {"hello world": [0.1, 0.2, 0.3]})
+
+        store = local_module.LocalMemoryStore(tmp_path)
+        store.add_chunks([_chunk("a", "x.md", "hello world")])
+
+        assert (tmp_path / ".htc" / "memory" / "embeddings.jsonl").exists()
+        assert store._embeddings["a"] == [0.1, 0.2, 0.3]
+
+    def test_remote_endpoint_takes_precedence_over_fastembed(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HTC_EMBED_BASE_URL", "https://embed.example.com")
+        monkeypatch.setenv("HTC_EMBED_API_KEY", "test-key")
+        monkeypatch.setenv("HTC_EMBED_MODEL", "test-embed-model")
+        self._install_fake_fastembed(monkeypatch, {"hello world": [9.9, 9.9, 9.9]})
+        monkeypatch.setattr(
+            local_module, "_post", _fake_post_factory({"hello world": [0.5, 0.5, 0.5]})
+        )
+
+        store = local_module.LocalMemoryStore(tmp_path)
+        store.add_chunks([_chunk("a", "x.md", "hello world")])
+
+        assert store._embeddings["a"] == [0.5, 0.5, 0.5]
+
+    def test_bm25_only_when_neither_remote_nor_fastembed_available(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("HTC_EMBED_BASE_URL", raising=False)
+        monkeypatch.delenv("HTC_EMBED_API_KEY", raising=False)
+        monkeypatch.delenv("HTC_EMBED_MODEL", raising=False)
+        monkeypatch.setattr(local_module, "_fastembed_available", lambda: False)
+
+        store = local_module.LocalMemoryStore(tmp_path)
+        store.add_chunks([_chunk("a", "x.md", "hello world")])
+
+        assert not (tmp_path / ".htc" / "memory" / "embeddings.jsonl").exists()
+
+
 class TestSupermemoryMemoryStore:
     def test_raises_clean_error_when_key_absent(self, monkeypatch):
         monkeypatch.delenv("SUPERMEMORY_API_KEY", raising=False)

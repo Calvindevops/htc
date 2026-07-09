@@ -1,12 +1,17 @@
 """LocalMemoryStore — the default, self-contained memory backend.
 
-No external service required: retrieval is BM25-style keyword scoring
-implemented in pure Python over a lowercase term index — works offline out
-of the box. If an OpenAI-compatible embeddings endpoint is configured
-(`HTC_EMBED_BASE_URL` + `HTC_EMBED_API_KEY` + `HTC_EMBED_MODEL`), retrieval
-becomes hybrid: BM25 and cosine-similarity semantic rankings are fused via
-Reciprocal Rank Fusion (RRF). With no embedding endpoint configured, behavior
-is unchanged — BM25 only.
+Retrieval is BM25-style keyword scoring implemented in pure Python over a
+lowercase term index — works offline out of the box with zero dependencies.
+On top of that, semantic search is on **by default** whenever an embedder is
+available, fused with BM25 via Reciprocal Rank Fusion (RRF):
+
+1. If an OpenAI-compatible embeddings endpoint is configured
+   (`HTC_EMBED_BASE_URL` + `HTC_EMBED_API_KEY` + `HTC_EMBED_MODEL`), that
+   endpoint is used.
+2. Else, if the `fastembed` package is installed (`pip install htc[embed]`),
+   a small local CPU model (`BAAI/bge-small-en-v1.5`) embeds chunks and
+   queries with no network call and no configuration required.
+3. Else, retrieval falls back to BM25 only.
 
 Chunks persist to `chunks.jsonl`; embeddings (when computed) persist
 alongside in a parallel `embeddings.jsonl`, so they aren't recomputed across
@@ -41,9 +46,13 @@ def _tokenize(text: str) -> list[str]:
     return _TOKEN.findall(text.lower())
 
 
+_FASTEMBED_MODEL_NAME = "BAAI/bge-small-en-v1.5"
+_fastembed_model_cache: dict[str, object] = {}
+
+
 def _embed_config() -> tuple[str, str, str] | None:
-    """Return (base_url, api_key, model) for the embeddings endpoint, or
-    `None` if not fully configured — the hybrid path is opt-in."""
+    """Return (base_url, api_key, model) for the remote embeddings endpoint,
+    or `None` if not fully configured."""
     base = os.environ.get("HTC_EMBED_BASE_URL")
     key = os.environ.get("HTC_EMBED_API_KEY")
     model = os.environ.get("HTC_EMBED_MODEL")
@@ -52,17 +61,50 @@ def _embed_config() -> tuple[str, str, str] | None:
     return base.rstrip("/"), key, model
 
 
+def _fastembed_available() -> bool:
+    """Whether the optional `fastembed` package (`pip install htc[embed]`)
+    is importable — the bundled, zero-config local embedder."""
+    try:
+        import fastembed  # noqa: F401
+    except ImportError:
+        return False
+    return True
+
+
+def _fastembed_model():
+    """Lazily import and cache the local fastembed model instance."""
+    if "model" not in _fastembed_model_cache:
+        from fastembed import TextEmbedding
+
+        _fastembed_model_cache["model"] = TextEmbedding(model_name=_FASTEMBED_MODEL_NAME)
+    return _fastembed_model_cache["model"]
+
+
+def _fastembed_embed(texts: list[str]) -> list[list[float]]:
+    model = _fastembed_model()
+    return [[float(x) for x in vector] for vector in model.embed(texts)]
+
+
+def _embedder_available() -> bool:
+    """Whether ANY embedder is available: a configured remote endpoint, or
+    the bundled local fastembed model. If neither, retrieval is BM25-only."""
+    return _embed_config() is not None or _fastembed_available()
+
+
 def _embed(texts: list[str]) -> list[list[float]]:
-    """Embed `texts` via the configured OpenAI-compatible `/embeddings` endpoint."""
+    """Embed `texts`: the configured remote OpenAI-compatible `/embeddings`
+    endpoint takes precedence; else the bundled local fastembed model."""
     config = _embed_config()
-    assert config is not None, "_embed called without HTC_EMBED_* configured"
-    base, key, model = config
-    data = _post(
-        f"{base}/embeddings",
-        {"content-type": "application/json", "authorization": f"Bearer {key}"},
-        {"model": model, "input": texts},
-    )
-    return [item["embedding"] for item in data["data"]]
+    if config is not None:
+        base, key, model = config
+        data = _post(
+            f"{base}/embeddings",
+            {"content-type": "application/json", "authorization": f"Bearer {key}"},
+            {"model": model, "input": texts},
+        )
+        return [item["embedding"] for item in data["data"]]
+    assert _fastembed_available(), "_embed called with no embedder available"
+    return _fastembed_embed(texts)
 
 
 def _cosine(a: list[float], b: list[float]) -> float:
@@ -131,7 +173,7 @@ class LocalMemoryStore:
             self._chunks_by_id[chunk.id] = chunk
         self._persist()
 
-        if _embed_config() is None or not chunks:
+        if not _embedder_available() or not chunks:
             return
         vectors = _embed([chunk.text for chunk in chunks])
         for chunk, vector in zip(chunks, vectors):
@@ -198,7 +240,7 @@ class LocalMemoryStore:
         scored = self._bm25_scored(chunks, set(query_terms))
         scored.sort(key=lambda pair: (-pair[0], pair[1].id))
 
-        if _embed_config() is None:
+        if not _embedder_available():
             return [SearchResult(chunk=chunk, score=score) for score, chunk in scored[:k]]
 
         semantic_ranking = self._semantic_ranking(query)

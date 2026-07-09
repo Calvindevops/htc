@@ -274,6 +274,36 @@ def _cmd_studio(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_wiki(args: argparse.Namespace) -> int:
+    from .world_model.build import build_memory
+    from .world_model.wiki import add_wiki_to_memory, build_wiki, write_wiki_files
+
+    start = time.perf_counter()
+    root_path = Path(args.root).expanduser().resolve()
+    topics = [t.strip() for t in args.topics.split(",") if t.strip()] if args.topics else None
+    print(f"building wiki for {args.root} ...")
+    store = build_memory(FilesystemAdapter(str(root_path)).sources(), root_path)
+    pages = build_wiki(store, topics=topics, model=args.model)
+    if not pages:
+        print("no topics inferred and none provided — nothing to build.")
+        return 1
+    add_wiki_to_memory(pages, store)
+    written = write_wiki_files(pages, root_path)
+    for path in written:
+        print(f"  wiki page -> {path}")
+    print(f"{len(pages)} page(s) written and indexed into memory (kind=wiki, now searchable).")
+    history.record_run(args.root, "wiki", {"num_pages": len(pages)})
+    telemetry.track(
+        "command_run",
+        {
+            "command": "wiki",
+            "provider": _safe_provider(),
+            "duration_bucket": telemetry.bucket_duration(time.perf_counter() - start),
+        },
+    )
+    return 0
+
+
 def _cmd_history(args: argparse.Namespace) -> int:
     entries = history.load_history(args.root)
     if not entries:
@@ -465,6 +495,16 @@ def main(argv: list[str] | None = None) -> int:
         "defaults to the repo via the filesystem adapter)",
     )
     p_studio.set_defaults(func=_cmd_studio)
+
+    p_wiki = sub.add_parser(
+        "wiki", help="synthesize a grounded LLM-wiki from memory, indexed back into it"
+    )
+    p_wiki.add_argument("--root", default=".", help="path to the company repo")
+    p_wiki.add_argument("--model", default=None, help="generation model override")
+    p_wiki.add_argument(
+        "--topics", default=None, help="comma-separated topics (default: inferred from memory)"
+    )
+    p_wiki.set_defaults(func=_cmd_wiki)
 
     p_hist = sub.add_parser("history", help="show run history and score trend")
     p_hist.add_argument("--root", required=True, help="path to the company repo")
